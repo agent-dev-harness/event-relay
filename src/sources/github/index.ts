@@ -11,7 +11,11 @@ export interface CiStatusChanged {
   check: 'check_run' | 'status';
   repository: string;
   sha: string;
-  /** null when the source hasn't seen this check on this commit before, or has forgotten it. */
+  /**
+   * null when the source hasn't seen this check on this commit before, or has
+   * forgotten it. An update older than the last one reported is dropped, so a
+   * late `in_progress` never follows its `completed`.
+   */
   from: string | null;
   to: string;
   url: string | null;
@@ -69,6 +73,8 @@ export interface WebhookResponse {
   message: string;
 }
 
+const isBefore = (a: CiObservation['order'], b: CiObservation['order']): boolean => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
+
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
 const DEFAULT_MAX_TRACKED_CHECKS = 10_000;
 
@@ -82,7 +88,7 @@ export class GitHubSource implements Source {
   readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec];
   private readonly secret: string;
   private readonly maxPayloadBytes: number;
-  private readonly lastStates: BoundedLru<string, string>;
+  private readonly lastStates: BoundedLru<string, { state: string; order: CiObservation['order'] }>;
   private context: SourceContext | undefined;
 
   constructor(options: GitHubSourceOptions) {
@@ -119,8 +125,13 @@ export class GitHubSource implements Source {
   private emitCiChange(context: SourceContext, observation: CiObservation): WebhookResponse {
     const subjectKey = `${observation.repository}@${observation.sha}`;
     const trackingKey = JSON.stringify([subjectKey, observation.check, observation.name]);
-    const from = this.lastStates.get(trackingKey) ?? null;
-    if (from === observation.state) return { status: 202, message: 'no change' };
+    const last = this.lastStates.get(trackingKey);
+    if (last && isBefore(observation.order, last.order)) return { status: 202, message: 'stale' };
+    const from = last?.state ?? null;
+    if (from === observation.state) {
+      this.lastStates.set(trackingKey, { state: observation.state, order: observation.order });
+      return { status: 202, message: 'no change' };
+    }
 
     const observedAt = new Date().toISOString();
     const event: RelayEvent<CiStatusChanged> = {
@@ -141,7 +152,7 @@ export class GitHubSource implements Source {
       untrusted: { name: observation.name },
     };
     context.emit(event);
-    this.lastStates.set(trackingKey, observation.state);
+    this.lastStates.set(trackingKey, { state: observation.state, order: observation.order });
     return { status: 202, message: 'accepted' };
   }
 

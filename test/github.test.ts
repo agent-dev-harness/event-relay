@@ -156,6 +156,39 @@ describe('GitHubSource', () => {
     });
   });
 
+  describe('out-of-order deliveries', () => {
+    const states = (emitted: RelayEvent[]) => emitted.map((e) => [(e.data as CiStatusChanged).from, (e.data as CiStatusChanged).to]);
+
+    it('drops a check run update that arrives after a later one', () => {
+      const { emitted, deliver } = started();
+
+      deliver('check_run', checkRunPayload(1, 'queued'));
+      deliver('check_run', checkRunPayload(1, 'completed', 'success'));
+      expect(deliver('check_run', checkRunPayload(1, 'in_progress')).message).toBe('stale');
+
+      expect(states(emitted)).toEqual([[null, 'queued'], ['queued', 'success']]);
+    });
+
+    it('drops an earlier run of the same check, but reports a re-run', () => {
+      const { emitted, deliver } = started();
+
+      deliver('check_run', checkRunPayload(2, 'completed', 'failure'));
+      expect(deliver('check_run', checkRunPayload(1, 'completed', 'success')).message).toBe('stale');
+      deliver('check_run', checkRunPayload(3, 'queued'));
+
+      expect(states(emitted)).toEqual([[null, 'failure'], ['failure', 'queued']]);
+    });
+
+    it('drops a commit status older than the last one', () => {
+      const { emitted, deliver } = started();
+
+      deliver('status', statusPayload(2, 'success'));
+      expect(deliver('status', statusPayload(1, 'pending')).message).toBe('stale');
+
+      expect(states(emitted)).toEqual([[null, 'success']]);
+    });
+  });
+
   it('ignores events it does not turn into changes', () => {
     const { emitted, deliver } = started();
     expect(deliver('ping', { zen: 'hi', repository: { full_name: 'o/r' } })).toEqual({ status: 202, message: 'ignored' });
