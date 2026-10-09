@@ -1,0 +1,46 @@
+{
+    "name": "@agent-dev-harness/event-relay",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Turns events from external sources into one event contract and delivers them to subscribers within fixed resource limits.",
+    "license": "MIT",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./contract": {
+            "types": "./dist/contract.d.ts",
+            "default": "./dist/contract.js"
+        },
+        "./github": {
+            "types": "./dist/sources/github/index.d.ts",
+            "default": "./dist/sources/github/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "engines": {
+        "node": ">=22.12"
+    },
+    "scripts": {
+        "build": "node build.mjs",
+        "prepare": "npm run build",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "lint": "tsc --noEmit -p tsconfig.json && eslint . && tsx scripts/check-explicit-any.ts && tsx scripts/check-boundary.ts",
+        "test": "vitest run"
+    },
+    "devDependencies": {
+        "@types/node": "^22.20.2",
+        "@typescript-eslint/eslint-plugin": "^8.70.0",
+        "@typescript-eslint/parser": "^8.70.0",
+        "esbuild": "^0.25.12",
+        "eslint": "^10.10.0",
+        "tsx": "^4.23.13",
+        "typescript": "^5.9.3",
+        "vite": "^6.4.3",
+        "vitest": "^5.0.1"
+    }
+}

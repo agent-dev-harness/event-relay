@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "experimentalDecorators": true,
+        "strict": true,
+        "useDefineForClassFields": false,
+        "lib": ["ES2022"],
+        "moduleResolution": "bundler",
+        "isolatedModules": true,
+        "moduleDetection": "force",
+        "allowImportingTsExtensions": true,
+        "target": "ES2022",
+        "noUnusedLocals": false,
+        "noUnusedParameters": false,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "noUncheckedIndexedAccess": true,
+        "noImplicitReturns": true,
+        "noEmit": true,
+        "skipLibCheck": true,
+        "types": ["node"],
+        "module": "ESNext",
+        "resolveJsonModule": true
+    },
+    "include": ["src", "test", "scripts", "build.mjs", "vitest.config.ts"]
+}
