@@ -1,6 +1,6 @@
 import type { KindSpec, RelayEvent, Source, SubscriptionOptions } from '../contract';
 import { BoundedLru } from './boundedLru';
-import { DEFAULT_LIMITS, type RelayLimits } from './limits';
+import { DEFAULT_LIMITS, validateInterval, validateLimits, type RelayLimits } from './limits';
 import { Subscription } from './subscription';
 
 interface RegisteredKind {
@@ -18,6 +18,7 @@ export class Relay {
 
   constructor(limits: Partial<RelayLimits> = {}) {
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    validateLimits(this.limits);
     this.seen = new BoundedLru(this.limits.maxDedupeIds);
   }
 
@@ -48,9 +49,7 @@ export class Relay {
   subscribe(id: string, options: SubscriptionOptions): void {
     if (this.stopController.signal.aborted) throw new Error('relay is stopped');
     const minIntervalMs = options.minIntervalMs ?? this.limits.minDeliveryIntervalMs;
-    if (minIntervalMs < this.limits.minDeliveryIntervalMs) {
-      throw new RangeError(`minIntervalMs ${minIntervalMs} is below the relay's minimum of ${this.limits.minDeliveryIntervalMs}`);
-    }
+    validateInterval('minIntervalMs', minIntervalMs, this.limits.minDeliveryIntervalMs);
 
     const existing = this.subscriptions.get(id);
     if (existing) {
@@ -85,15 +84,18 @@ export class Relay {
       throw new Error(`source "${sourceId}" emitted kind "${event.kind}", which it did not declare`);
     }
     if (this.stopController.signal.aborted || this.seen.has(event.id)) return;
+
+    // Both can throw; doing them before any state changes means a throw leaves
+    // the event unseen and unqueued, so the source can fix and re-emit it.
+    const bytes = Buffer.byteLength(JSON.stringify(event));
+    const coalesceKey = registered.spec.coalesceKey(event);
     this.seen.set(event.id, true);
 
     const matching = [...this.subscriptions.values()].filter((s) => s.matches(event));
-    if (matching.length === 0) return;
-
-    if (Buffer.byteLength(JSON.stringify(event)) > this.limits.maxEventBytes) {
+    if (bytes > this.limits.maxEventBytes) {
       for (const subscription of matching) subscription.reportDropped(event, 'oversized');
       return;
     }
-    for (const subscription of matching) subscription.enqueue(event, registered.spec);
+    for (const subscription of matching) subscription.enqueue(event, registered.spec, coalesceKey);
   }
 }

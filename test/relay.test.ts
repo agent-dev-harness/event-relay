@@ -197,6 +197,23 @@ describe('Relay', () => {
       expect(batches[1]).toHaveLength(1);
     });
 
+    it('counts a delivery that never settles as failed once deliveryTimeoutMs passes', async () => {
+      const { relay, batches, emit } = await setup([spec()], { deliveryTimeoutMs: 5_000 });
+      const deliver = vi.fn(async (batch: readonly RelayEvent[]) => { batches.push([...batch]); });
+      deliver.mockImplementationOnce(() => new Promise(() => {}));
+      relay.subscribe('s', { filter: {}, sink: { deliver } });
+
+      emit(event('1'));
+      await vi.advanceTimersByTimeAsync(0);
+      emit(event('2'));
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(deliver).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2);
+      expect(gaps(batches[0])[0]!.data).toEqual({ kinds: ['test.changed'], dropped: 1, reasons: ['delivery-failed'] });
+      expect(ids(batches[0]).slice(1)).toEqual(['2']);
+    });
+
     it('reports a batch the sink failed to take in the next delivery', async () => {
       const { relay, batches, emit } = await setup();
       const deliver = vi.fn(async (batch: readonly RelayEvent[]) => { batches.push([...batch]); });
@@ -214,7 +231,67 @@ describe('Relay', () => {
     });
   });
 
+  describe('limits', () => {
+    it.each([
+      ['maxQueuedEventsPerSubscriber', 0],
+      ['maxSubscriptions', Number.NaN],
+      ['maxEventBytes', 1.5],
+      ['minDeliveryIntervalMs', Number.POSITIVE_INFINITY],
+      ['minDeliveryIntervalMs', -1],
+      ['deliveryTimeoutMs', 0],
+      ['deliveryTimeoutMs', 2 ** 31],
+    ])('refuses %s = %s', (name, value) => {
+      expect(() => new Relay({ [name]: value })).toThrow(RangeError);
+    });
+
+    it.each([Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31])('refuses minIntervalMs = %s', async (value) => {
+      const { relay, sink } = await setup();
+      expect(() => relay.subscribe('s', { filter: {}, sink, minIntervalMs: value })).toThrow(RangeError);
+    });
+  });
+
+  it('keeps its pace when the wall clock jumps back', async () => {
+    const { relay, sink, batches, emit } = await setup();
+    relay.subscribe('s', { filter: {}, sink });
+
+    emit(event('1'));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() - 60 * 60 * 1_000);
+    emit(event('2'));
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+
+    expect(batches.map(ids)).toEqual([['1'], ['2']]);
+  });
+
   describe('sources', () => {
+    it('leaves the event unseen and unqueued when its coalesceKey throws', async () => {
+      const coalesceKey = vi.fn<KindSpec['coalesceKey']>(() => null).mockImplementationOnce(() => { throw new Error('bad key'); });
+      const { relay, sink, batches, emit } = await setup([spec({ coalesceKey })]);
+      relay.subscribe('s', { filter: {}, sink });
+      relay.subscribe('t', { filter: {}, sink });
+
+      expect(() => emit(event('1'))).toThrow('bad key');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batches).toEqual([]);
+
+      emit(event('1'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batches.map(ids)).toEqual([['1'], ['1']]);
+    });
+
+    it('throws for an event that cannot be serialized, and accepts its id once fixed', async () => {
+      const { relay, sink, batches, emit } = await setup();
+      relay.subscribe('s', { filter: {}, sink });
+
+      expect(() => emit(event('1', { data: { n: 1n } }))).toThrow(TypeError);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batches).toEqual([]);
+
+      emit(event('1'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(batches.map(ids)).toEqual([['1']]);
+    });
+
     it('throws when a source emits a kind it did not declare', async () => {
       const { emit } = await setup();
       expect(() => emit(event('1', { kind: 'undeclared' }))).toThrow(/did not declare/);

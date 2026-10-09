@@ -35,8 +35,10 @@ Source → emit → dedupe → match subscriptions → per-subscriber queue (coa
 
 Every buffer the relay keeps has a cap (`RelayLimits`, defaults in `src/core/limits.ts`): number
 of subscriptions, events queued per subscriber, gap subjects per subscriber, event size, and
-event ids remembered for dedupe. Deliveries to one subscriber are at least `minDeliveryIntervalMs`
-apart and never overlap. Sources cap their own ingestion: `GitHubSource` refuses bodies over
+event ids remembered for dedupe. Deliveries to one subscriber start at least `minDeliveryIntervalMs`
+apart, and the next one waits until the previous one has settled or run past `deliveryTimeoutMs`,
+which counts as a failed delivery. The relay refuses limits it can't enforce, such as `NaN`,
+`Infinity` or a cap of 0. Sources cap their own ingestion: `GitHubSource` refuses bodies over
 `maxPayloadBytes` before parsing them and remembers at most `maxTrackedChecks` check states.
 
 Nothing is dropped silently. When the relay drops an event (queue full, too large, expired, or

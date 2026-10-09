@@ -62,7 +62,11 @@ export interface KindSpec {
 }
 
 export interface SourceContext {
-  /** Hands a change to the relay. Throws if the event's kind isn't one the source declared. */
+  /**
+   * Hands a change to the relay. Throws, and delivers the event to no one, if
+   * its kind isn't one the source declared, it can't be serialized as JSON, or
+   * its kind's coalesceKey throws.
+   */
   emit(event: RelayEvent): void;
   /** Fires when the relay stops. The source must then stop ingesting and release what it holds. */
   signal: AbortSignal;
@@ -83,7 +87,10 @@ export interface SubscriptionFilter {
 }
 
 export interface Sink {
-  /** Delivers one batch. Gap events come first. A rejection counts as losing the batch. */
+  /**
+   * Delivers one batch. Gap events come first. A rejection, or not settling
+   * within the relay's deliveryTimeoutMs, counts as losing the batch.
+   */
   deliver(batch: readonly RelayEvent[]): Promise<void>;
 }
 
