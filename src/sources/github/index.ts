@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { KindSpec, RelayEvent, Source, SourceContext } from '../../contract';
 import { BoundedLru } from '../../core/boundedLru';
-import { readCiObservation } from './normalize';
+import { readCiObservation, readPrHeadObservation, type CiObservation, type PrHeadObservation } from './normalize';
 
 export const CI_STATUS_CHANGED = 'ci.status_changed';
 
@@ -23,6 +23,28 @@ const ciStatusChangedSpec: KindSpec = {
   kind: CI_STATUS_CHANGED,
   // The relay calls this only with events of this kind, which only this source creates.
   coalesceKey: (event) => `${event.subject.key}|${(event.data as CiStatusChanged).check}|${event.untrusted.name}`,
+  overflow: 'drop-oldest',
+};
+
+export const PR_HEAD_CHANGED = 'pr.head_changed';
+
+/**
+ * `data` of a `pr.head_changed` event, sent when a PR is opened or reopened or
+ * gets new commits. Its subject is `{ type: "pull_request", key: "<owner>/<repo>#<number>" }`.
+ * The new head's CI arrives as `ci.status_changed` on the commit `<repository>@<to>`.
+ */
+export interface PrHeadChanged {
+  repository: string;
+  number: number;
+  /** The previous head on a push to the PR; null when it was opened or reopened. */
+  from: string | null;
+  to: string;
+  url: string | null;
+}
+
+const prHeadChangedSpec: KindSpec = {
+  kind: PR_HEAD_CHANGED,
+  coalesceKey: (event) => event.subject.key,
   overflow: 'drop-oldest',
 };
 
@@ -51,12 +73,13 @@ const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
 const DEFAULT_MAX_TRACKED_CHECKS = 10_000;
 
 /**
- * Emits `ci.status_changed` from GitHub `check_run` and `status` webhooks. Host
+ * Emits `ci.status_changed` from GitHub `check_run` and `status` webhooks, and
+ * `pr.head_changed` from `pull_request` webhooks. Host
  * `handler` on an HTTP server, or pass deliveries to `receive` yourself.
  */
 export class GitHubSource implements Source {
   readonly id = 'github';
-  readonly kinds = [ciStatusChangedSpec];
+  readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec];
   private readonly secret: string;
   private readonly maxPayloadBytes: number;
   private readonly lastStates: BoundedLru<string, string>;
@@ -86,9 +109,14 @@ export class GitHubSource implements Source {
       return { status: 400, message: 'body is not JSON' };
     }
 
-    const observation = readCiObservation(delivery.eventName, payload);
-    if (!observation) return { status: 202, message: 'ignored' };
+    const ci = readCiObservation(delivery.eventName, payload);
+    if (ci) return this.emitCiChange(context, ci);
+    const prHead = readPrHeadObservation(delivery.eventName, payload);
+    if (prHead) return this.emitPrHeadChange(context, prHead);
+    return { status: 202, message: 'ignored' };
+  }
 
+  private emitCiChange(context: SourceContext, observation: CiObservation): WebhookResponse {
     const subjectKey = `${observation.repository}@${observation.sha}`;
     const trackingKey = JSON.stringify([subjectKey, observation.check, observation.name]);
     const from = this.lastStates.get(trackingKey) ?? null;
@@ -114,6 +142,29 @@ export class GitHubSource implements Source {
     };
     context.emit(event);
     this.lastStates.set(trackingKey, observation.state);
+    return { status: 202, message: 'accepted' };
+  }
+
+  private emitPrHeadChange(context: SourceContext, observation: PrHeadObservation): WebhookResponse {
+    if (observation.before === observation.sha) return { status: 202, message: 'no change' };
+    const subjectKey = `${observation.repository}#${observation.number}`;
+    const observedAt = new Date().toISOString();
+    const event: RelayEvent<PrHeadChanged> = {
+      id: `github:pull_request:${subjectKey}:${observation.before ?? 'none'}..${observation.sha}`,
+      kind: PR_HEAD_CHANGED,
+      subject: { type: 'pull_request', key: subjectKey },
+      occurredAt: observation.occurredAt ?? observedAt,
+      observedAt,
+      data: {
+        repository: observation.repository,
+        number: observation.number,
+        from: observation.before,
+        to: observation.sha,
+        url: observation.url,
+      },
+      untrusted: {},
+    };
+    context.emit(event);
     return { status: 202, message: 'accepted' };
   }
 
