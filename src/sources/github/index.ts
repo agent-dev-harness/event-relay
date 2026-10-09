@@ -1,56 +1,19 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { KindSpec, RelayEvent, Source, SourceContext } from '../../contract';
+import type { RelayEvent, Source, SourceContext } from '../../contract';
 import { BoundedLru } from '../../core/boundedLru';
+import {
+  CI_STATUS_CHANGED,
+  ciStatusChangedSpec,
+  commitSubject,
+  PR_HEAD_CHANGED,
+  prHeadChangedSpec,
+  pullRequestSubject,
+  type CiState,
+  type CiStatusChanged,
+  type PrHeadChanged,
+} from '../../kinds';
 import { readCiObservation, readPrHeadObservation, type CiObservation, type PrHeadObservation } from './normalize';
-
-export const CI_STATUS_CHANGED = 'ci.status_changed';
-
-/** `data` of a `ci.status_changed` event. Its subject is `{ type: "commit", key: "<owner>/<repo>@<sha>" }`. */
-export interface CiStatusChanged {
-  check: 'check_run' | 'status';
-  repository: string;
-  sha: string;
-  /**
-   * null when the source hasn't seen this check on this commit before, or has
-   * forgotten it. An update older than the last one reported is dropped, so a
-   * late `in_progress` never follows its `completed`.
-   */
-  from: string | null;
-  to: string;
-  url: string | null;
-  /** Same-repository PRs GitHub reported for a check run; always empty for a commit status. */
-  pullRequests: number[];
-}
-
-const ciStatusChangedSpec: KindSpec = {
-  kind: CI_STATUS_CHANGED,
-  // The relay calls this only with events of this kind, which only this source creates.
-  coalesceKey: (event) => `${event.subject.key}|${(event.data as CiStatusChanged).check}|${event.untrusted.name}`,
-  overflow: 'drop-oldest',
-};
-
-export const PR_HEAD_CHANGED = 'pr.head_changed';
-
-/**
- * `data` of a `pr.head_changed` event, sent when a PR is opened or reopened or
- * gets new commits. Its subject is `{ type: "pull_request", key: "<owner>/<repo>#<number>" }`.
- * The new head's CI arrives as `ci.status_changed` on the commit `<repository>@<to>`.
- */
-export interface PrHeadChanged {
-  repository: string;
-  number: number;
-  /** The previous head on a push to the PR; null when it was opened or reopened. */
-  from: string | null;
-  to: string;
-  url: string | null;
-}
-
-const prHeadChangedSpec: KindSpec = {
-  kind: PR_HEAD_CHANGED,
-  coalesceKey: (event) => event.subject.key,
-  overflow: 'drop-oldest',
-};
 
 export interface GitHubSourceOptions {
   webhookSecret: string;
@@ -82,13 +45,17 @@ const DEFAULT_MAX_TRACKED_CHECKS = 10_000;
  * Emits `ci.status_changed` from GitHub `check_run` and `status` webhooks, and
  * `pr.head_changed` from `pull_request` webhooks. Host
  * `handler` on an HTTP server, or pass deliveries to `receive` yourself.
+ *
+ * A check is reported only when its CiState changes, and an update older than
+ * the last one reported for that check is dropped, so a late `in_progress`
+ * never follows its `completed`.
  */
 export class GitHubSource implements Source {
   readonly id = 'github';
   readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec];
   private readonly secret: string;
   private readonly maxPayloadBytes: number;
-  private readonly lastStates: BoundedLru<string, { state: string; order: CiObservation['order'] }>;
+  private readonly lastStates: BoundedLru<string, { state: CiState; order: CiObservation['order'] }>;
   private context: SourceContext | undefined;
 
   constructor(options: GitHubSourceOptions) {
@@ -123,8 +90,8 @@ export class GitHubSource implements Source {
   }
 
   private emitCiChange(context: SourceContext, observation: CiObservation): WebhookResponse {
-    const subjectKey = `${observation.repository}@${observation.sha}`;
-    const trackingKey = JSON.stringify([subjectKey, observation.check, observation.name]);
+    const subject = commitSubject(observation.repository, observation.sha);
+    const trackingKey = JSON.stringify([subject.key, observation.check, observation.name]);
     const last = this.lastStates.get(trackingKey);
     if (last && isBefore(observation.order, last.order)) return { status: 202, message: 'stale' };
     const from = last?.state ?? null;
@@ -137,17 +104,17 @@ export class GitHubSource implements Source {
     const event: RelayEvent<CiStatusChanged> = {
       id: `github:${observation.deliveryKey}`,
       kind: CI_STATUS_CHANGED,
-      subject: { type: 'commit', key: subjectKey },
+      subject,
       occurredAt: observation.occurredAt ?? observedAt,
       observedAt,
       data: {
-        check: observation.check,
         repository: observation.repository,
         sha: observation.sha,
+        check: observation.check,
         from,
         to: observation.state,
+        detail: observation.detail,
         url: observation.url,
-        pullRequests: observation.pullRequests,
       },
       untrusted: { name: observation.name },
     };
@@ -158,12 +125,12 @@ export class GitHubSource implements Source {
 
   private emitPrHeadChange(context: SourceContext, observation: PrHeadObservation): WebhookResponse {
     if (observation.before === observation.sha) return { status: 202, message: 'no change' };
-    const subjectKey = `${observation.repository}#${observation.number}`;
+    const subject = pullRequestSubject(observation.repository, observation.number);
     const observedAt = new Date().toISOString();
     const event: RelayEvent<PrHeadChanged> = {
-      id: `github:pull_request:${subjectKey}:${observation.before ?? 'none'}..${observation.sha}`,
+      id: `github:pull_request:${subject.key}:${observation.before ?? 'none'}..${observation.sha}`,
       kind: PR_HEAD_CHANGED,
-      subject: { type: 'pull_request', key: subjectKey },
+      subject,
       occurredAt: observation.occurredAt ?? observedAt,
       observedAt,
       data: {

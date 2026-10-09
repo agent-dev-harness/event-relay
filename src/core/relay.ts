@@ -5,7 +5,7 @@ import { Subscription } from './subscription';
 
 interface RegisteredKind {
   spec: KindSpec;
-  sourceId: string;
+  sourceIds: Set<string>;
 }
 
 export class Relay {
@@ -22,22 +22,35 @@ export class Relay {
     this.seen = new BoundedLru(this.limits.maxDedupeIds);
   }
 
-  /** Registers a source and its kinds, then starts it. */
+  /**
+   * Registers a source and its kinds, then starts it. Several sources can emit
+   * one kind, as long as they declare it with the same KindSpec object.
+   */
   async addSource(source: Source): Promise<void> {
     if (this.stopController.signal.aborted) throw new Error('relay is stopped');
     if (this.sources.has(source.id)) throw new Error(`source "${source.id}" is already registered`);
     for (const spec of source.kinds) {
-      const owner = this.kinds.get(spec.kind);
-      if (owner) throw new Error(`kind "${spec.kind}" is already registered by source "${owner.sourceId}"`);
+      const registered = this.kinds.get(spec.kind);
+      if (registered && registered.spec !== spec) {
+        throw new Error(`kind "${spec.kind}" is already registered with a different spec by source(s) ${[...registered.sourceIds].join(', ')}`);
+      }
     }
 
     this.sources.add(source.id);
-    for (const spec of source.kinds) this.kinds.set(spec.kind, { spec, sourceId: source.id });
+    for (const spec of source.kinds) {
+      const registered = this.kinds.get(spec.kind);
+      if (registered) registered.sourceIds.add(source.id);
+      else this.kinds.set(spec.kind, { spec, sourceIds: new Set([source.id]) });
+    }
     try {
       await source.start({ emit: (event) => this.emit(source.id, event), signal: this.stopController.signal });
     } catch (error) {
       this.sources.delete(source.id);
-      for (const spec of source.kinds) this.kinds.delete(spec.kind);
+      for (const spec of source.kinds) {
+        const registered = this.kinds.get(spec.kind);
+        registered?.sourceIds.delete(source.id);
+        if (registered?.sourceIds.size === 0) this.kinds.delete(spec.kind);
+      }
       throw error;
     }
   }
@@ -80,7 +93,7 @@ export class Relay {
 
   private emit(sourceId: string, event: RelayEvent): void {
     const registered = this.kinds.get(event.kind);
-    if (!registered || registered.sourceId !== sourceId) {
+    if (!registered || !registered.sourceIds.has(sourceId)) {
       throw new Error(`source "${sourceId}" emitted kind "${event.kind}", which it did not declare`);
     }
     if (this.stopController.signal.aborted || this.seen.has(event.id)) return;

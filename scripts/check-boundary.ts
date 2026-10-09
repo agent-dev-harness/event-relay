@@ -1,6 +1,7 @@
 // Fails if anything under src/, test/ or scripts/ imports from outside the package, or if
-// the contract or core imports a source. Keeping core free of sources is what lets a
-// source move to its own package later without rewriting the core.
+// one layer imports another it must not know about. Keeping the contract and core free
+// of kinds and sources is what keeps provider details out of them, and lets a source
+// move to its own package later without rewriting the core.
 import fs from 'node:fs';
 import path from 'node:path';
 import { isBuiltin } from 'node:module';
@@ -10,8 +11,16 @@ import ts from 'typescript';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TARGET_ROOTS: readonly string[] = ['src', 'test', 'scripts'];
 const ALLOWED_BARE_SPECS: ReadonlySet<string> = new Set(['vitest', 'typescript']);
-const SOURCE_FREE: readonly string[] = ['src/contract.ts', 'src/core'];
-const SOURCES_DIR = path.join(REPO_ROOT, 'src', 'sources');
+interface LayerRule {
+  from: readonly string[];
+  mustNotImport: readonly string[];
+  message: string;
+}
+
+const LAYER_RULES: readonly LayerRule[] = [
+  { from: ['src/contract.ts', 'src/core'], mustNotImport: ['src/kinds', 'src/sources'], message: 'the contract and core must not import a kind or a source' },
+  { from: ['src/kinds'], mustNotImport: ['src/core', 'src/sources'], message: 'kinds may import only the contract' },
+];
 
 interface FoundImport {
   file: string;
@@ -68,9 +77,9 @@ function problemWith({ file, spec }: FoundImport): string | null {
   }
   const target = path.resolve(path.dirname(file), spec);
   if (!isInside(target, REPO_ROOT)) return 'imports from outside the package';
-  const sourceFree = SOURCE_FREE.some((entry) => isInside(file, path.join(REPO_ROOT, entry)));
-  if (sourceFree && isInside(target, SOURCES_DIR)) return 'the contract and core must not import a source';
-  return null;
+  const within = (entries: readonly string[], p: string): boolean => entries.some((entry) => isInside(p, path.join(REPO_ROOT, entry)));
+  const broken = LAYER_RULES.find((rule) => within(rule.from, file) && within(rule.mustNotImport, target));
+  return broken ? broken.message : null;
 }
 
 function main(): void {
@@ -85,9 +94,9 @@ function main(): void {
     }
     files.push(...rootFiles);
   }
-  const missing = SOURCE_FREE.filter((entry) => !fs.existsSync(path.join(REPO_ROOT, entry)));
+  const missing = LAYER_RULES.flatMap((rule) => [...rule.from, ...rule.mustNotImport]).filter((entry) => !fs.existsSync(path.join(REPO_ROOT, entry)));
   if (missing.length > 0) {
-    console.error(`\n❌ ERROR: ${missing.join(', ')} not found. Update SOURCE_FREE rather than letting this check silently pass.\n`);
+    console.error(`\n❌ ERROR: ${missing.join(', ')} not found. Update LAYER_RULES rather than letting this check silently pass.\n`);
     process.exit(1);
   }
 
