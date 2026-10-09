@@ -9,6 +9,12 @@ export interface CiObservation {
   state: string;
   /** Unique per payload, so a redelivery maps to the same event. */
   deliveryKey: string;
+  /**
+   * Compared element by element, a later update of the same check is greater.
+   * GitHub's ids grow with each new check run or status, and one run goes
+   * queued → in_progress → completed.
+   */
+  order: readonly [id: number, step: number];
   occurredAt: string | null;
   url: string | null;
   pullRequests: number[];
@@ -19,6 +25,8 @@ type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
 const str = (obj: Json, key: string): string | null => (typeof obj[key] === 'string' ? obj[key] : null);
 const num = (obj: Json, key: string): number | null => (typeof obj[key] === 'number' ? obj[key] : null);
+
+const CHECK_RUN_STEPS: Readonly<Record<string, number>> = { in_progress: 1, completed: 2 };
 
 /** Returns null for payloads that aren't a CI state, or lack a field this needs. */
 export function readCiObservation(eventName: string, payload: unknown): CiObservation | null {
@@ -44,6 +52,7 @@ export function readCiObservation(eventName: string, payload: unknown): CiObserv
       sha,
       state,
       deliveryKey: `check_run:${id}:${state}`,
+      order: [id, CHECK_RUN_STEPS[status] ?? 0],
       occurredAt: str(run, 'completed_at') ?? str(run, 'started_at'),
       url: str(run, 'html_url'),
       pullRequests,
@@ -63,6 +72,7 @@ export function readCiObservation(eventName: string, payload: unknown): CiObserv
       sha,
       state,
       deliveryKey: `status:${id}`,
+      order: [id, 0],
       occurredAt: str(payload, 'updated_at') ?? str(payload, 'created_at'),
       url: str(payload, 'target_url'),
       pullRequests: [],
