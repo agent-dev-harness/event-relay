@@ -297,9 +297,35 @@ describe('Relay', () => {
       expect(() => emit(event('1', { kind: 'undeclared' }))).toThrow(/did not declare/);
     });
 
-    it('refuses a second source declaring the same kind', async () => {
+    it('refuses a second source declaring the same kind with a different spec', async () => {
       const { relay } = await setup();
-      await expect(relay.addSource({ id: 'other', kinds: [spec()], start: () => {} })).rejects.toThrow(/already registered/);
+      await expect(relay.addSource({ id: 'other', kinds: [spec()], start: () => {} })).rejects.toThrow(/different spec/);
+    });
+
+    it('delivers one kind from several sources that share its spec', async () => {
+      const shared = spec();
+      const { relay, sink, batches, emit } = await setup([shared]);
+      let other: SourceContext | undefined;
+      await relay.addSource({ id: 'other', kinds: [shared], start: (ctx) => { other = ctx; } });
+      relay.subscribe('s', { filter: { kinds: ['test.changed'] }, sink });
+
+      emit(event('1'));
+      other!.emit(event('2'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(batches.map(ids)).toEqual([['1', '2']]);
+    });
+
+    it('keeps a shared kind registered for the other source when one fails to start', async () => {
+      const shared = spec();
+      const { relay, sink, batches, emit } = await setup([shared]);
+      await expect(relay.addSource({ id: 'flaky', kinds: [shared], start: () => { throw new Error('no'); } })).rejects.toThrow('no');
+      relay.subscribe('s', { filter: {}, sink });
+
+      emit(event('1'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(batches.map(ids)).toEqual([['1']]);
     });
 
     it('unregisters a source whose start fails', async () => {

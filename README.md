@@ -27,9 +27,9 @@ Source → emit → dedupe → match subscriptions → per-subscriber queue (coa
 | Part | What it does |
 |---|---|
 | **Contract** (`src/contract.ts`) | `RelayEvent`, `KindSpec`, `Source`, `Sink`. It imports nothing, so consumers can use it without loading the relay. |
-| **Sources** (`src/sources/<name>/`) | Each source owns how its events arrive (webhook, polling, …) and turns them into changes: a redelivered payload or a repeat of the current state produces no event. Text written by third parties goes in `untrusted`, never in `data`. |
-| **Kinds** | Each source declares the kinds it emits. A kind's `KindSpec` says whether its events coalesce (a subscriber only gets the latest per key), which event goes when a queue is full, and how long an event may wait. |
-| **Core** (`src/core/`) | Subscriptions, delivery and resource limits. It must not import a source; `scripts/check-boundary.ts` enforces that, so a source can move to its own package without changing the core. |
+| **Sources** (`src/sources/<name>/`) | Each source owns how its events arrive (webhook, polling, …) and turns them into changes of the kinds it declares: a redelivered payload or a repeat of the current state produces no event. Text written by third parties goes in `untrusted`, never in `data`. |
+| **Kinds** (`src/kinds/`) | Each kind's data shape, subject and `KindSpec`, defined once in provider-neutral terms, so consumers don't depend on a source and several sources can emit one kind. A `KindSpec` says whether events coalesce (a subscriber only gets the latest per key), which event goes when a queue is full, and how long an event may wait. Kinds import only the contract. |
+| **Core** (`src/core/`) | Subscriptions, delivery and resource limits. It must not import a kind or a source; `scripts/check-boundary.ts` enforces that, so provider details stay out of the core and a source can move to its own package without changing it. |
 
 ### Resource limits
 
@@ -48,7 +48,8 @@ state itself. Gaps for more subjects than `maxGapSubjectsPerSubscriber` collapse
 `ALL_SUBJECTS`.
 
 Delivery is best effort: events can arrive late or out of order. Compare `occurredAt` and
-`observedAt` to spot stale ones.
+`observedAt` to spot stale ones. Treat an event as a hint that something changed, not as a
+command: before acting on one, check the current state at its source.
 
 ## Entrypoints
 
@@ -56,14 +57,16 @@ Delivery is best effort: events can arrive late or out of order. Compare `occurr
 |---|---|
 | `@agent-dev-harness/event-relay` | `Relay`, `RelayLimits`, `DEFAULT_LIMITS`, and everything in `./contract` |
 | `@agent-dev-harness/event-relay/contract` | `RelayEvent`, `Subject`, `KindSpec`, `Source`, `SourceContext`, `Sink`, `SubscriptionFilter`, `SubscriptionOptions`, `GapEvent`, `GapData`, `GapReason`, `GAP_KIND`, `ALL_SUBJECTS` |
-| `@agent-dev-harness/event-relay/github` | `GitHubSource`, `CI_STATUS_CHANGED`, `CiStatusChanged`, `PR_HEAD_CHANGED`, `PrHeadChanged` |
+| `@agent-dev-harness/event-relay/kinds` | `CI_STATUS_CHANGED`, `CiStatusChanged`, `CiState`, `commitSubject`, `ciStatusChangedSpec`, `PR_HEAD_CHANGED`, `PrHeadChanged`, `pullRequestSubject`, `prHeadChangedSpec` |
+| `@agent-dev-harness/event-relay/github` | `GitHubSource` |
 
 ```ts
 import { createServer } from "node:http";
 import { Relay } from "@agent-dev-harness/event-relay";
+import { GitHubSource } from "@agent-dev-harness/event-relay/github";
 import {
-  CI_STATUS_CHANGED, GitHubSource, PR_HEAD_CHANGED, type PrHeadChanged,
-} from "@agent-dev-harness/event-relay/github";
+  CI_STATUS_CHANGED, commitSubject, PR_HEAD_CHANGED, pullRequestSubject, type PrHeadChanged,
+} from "@agent-dev-harness/event-relay/kinds";
 
 const relay = new Relay();
 const github = new GitHubSource({ webhookSecret: process.env.GITHUB_WEBHOOK_SECRET! });
@@ -71,12 +74,12 @@ await relay.addSource(github);
 createServer(github.handler).listen(8080);
 
 // Follow PR #123's CI across pushes: each new head moves the CI filter to that commit.
-const pr = { type: "pull_request", key: "owner/repo#123" };
+const repository = "github.com/owner/repo";
 const follow = (headSha: string) =>
   relay.subscribe("pr-123", {
     filter: {
       kinds: [PR_HEAD_CHANGED, CI_STATUS_CHANGED],
-      subjects: [pr, { type: "commit", key: `owner/repo@${headSha}` }],
+      subjects: [pullRequestSubject(repository, 123), commitSubject(repository, headSha)],
     },
     sink: {
       deliver: async (batch) => {
@@ -94,11 +97,18 @@ Calling `subscribe` again with the same id changes that subscription; `cancel(id
 
 ### Event kinds
 
-| Kind | Source | Subject | Coalesces per |
+Repositories are named `<host>/<path>`, e.g. `github.com/owner/repo`, so the same path on two
+hosts names two repositories.
+
+| Kind | Emitted by | Subject | Coalesces per |
 |---|---|---|---|
-| `ci.status_changed` | GitHub `check_run` and `status` webhooks | `commit`, `<owner>/<repo>@<sha>` | commit and check |
-| `pr.head_changed` | GitHub `pull_request` webhooks (opened, reopened, synchronize) | `pull_request`, `<owner>/<repo>#<number>` | PR |
+| `ci.status_changed` | GitHub `check_run` and `status` webhooks | `commitSubject`: `commit`, `<repository>@<sha>` | commit and check |
+| `pr.head_changed` | GitHub `pull_request` webhooks (opened, reopened, synchronize) | `pullRequestSubject`: `pull_request`, `<repository>#<number>` | PR |
 | `relay.gap` | the relay | the subject events were lost for | never; at most one per subject per batch |
+
+`ci.status_changed` reports each check as a `CiState` (`pending`, `running`, `success`,
+`failure`, `cancelled`, `skipped` or `neutral`) and keeps the provider's own name for it, such as
+GitHub's `timed_out`, in `detail`. A state the source doesn't recognize counts as `failure`.
 
 ## Development
 

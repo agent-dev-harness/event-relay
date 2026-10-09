@@ -3,10 +3,12 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, GitHubSource, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/sources/github/index';
+import { CI_STATUS_CHANGED, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/kinds/index';
+import { GitHubSource } from '../src/sources/github/index';
 
 const SECRET = 'test-secret';
 const SHA = 'a'.repeat(40);
+const REPOSITORY = { full_name: 'o/r', html_url: 'https://github.com/o/r' };
 
 function sign(body: Buffer, secret = SECRET): string {
   return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`;
@@ -26,12 +28,12 @@ function checkRunPayload(id: number, status: string, conclusion: string | null =
       completed_at: status === 'completed' ? '2026-01-01T00:05:00Z' : null,
       pull_requests: [{ number: 7 }],
     },
-    repository: { full_name: 'o/r' },
+    repository: REPOSITORY,
   };
 }
 
 function statusPayload(id: number, state: string) {
-  return { id, sha: SHA, context: 'ci/legacy', state, target_url: null, updated_at: '2026-01-01T00:00:00Z', repository: { full_name: 'o/r' } };
+  return { id, sha: SHA, context: 'ci/legacy', state, target_url: null, updated_at: '2026-01-01T00:00:00Z', repository: REPOSITORY };
 }
 
 function pullRequestPayload(action: string, head: string, before?: string) {
@@ -40,7 +42,7 @@ function pullRequestPayload(action: string, head: string, before?: string) {
     number: 7,
     ...(before === undefined ? {} : { before, after: head }),
     pull_request: { number: 7, head: { sha: head, ref: 'feature' }, updated_at: '2026-01-01T00:00:00Z', html_url: 'https://github.com/o/r/pull/7' },
-    repository: { full_name: 'o/r' },
+    repository: REPOSITORY,
   };
 }
 
@@ -64,15 +66,47 @@ describe('GitHubSource', () => {
     deliver('check_run', checkRunPayload(1, 'completed', 'failure'));
 
     expect(emitted.map((e) => [e.kind, (e.data as CiStatusChanged).from, (e.data as CiStatusChanged).to])).toEqual([
-      [CI_STATUS_CHANGED, null, 'queued'],
-      [CI_STATUS_CHANGED, 'queued', 'failure'],
+      [CI_STATUS_CHANGED, null, 'pending'],
+      [CI_STATUS_CHANGED, 'pending', 'failure'],
     ]);
     expect(emitted[1]).toMatchObject({
       id: 'github:check_run:1:failure',
-      subject: { type: 'commit', key: `o/r@${SHA}` },
+      subject: { type: 'commit', key: `github.com/o/r@${SHA}` },
       occurredAt: '2026-01-01T00:05:00Z',
-      data: { check: 'check_run', repository: 'o/r', sha: SHA, pullRequests: [7] },
+      data: { repository: 'github.com/o/r', sha: SHA, check: 'check_run', detail: 'failure' },
     });
+  });
+
+  it('maps GitHub states onto CiState, keeping GitHub\'s own name in detail', () => {
+    const { emitted, deliver } = started();
+
+    deliver('check_run', checkRunPayload(1, 'in_progress'));
+    deliver('check_run', checkRunPayload(1, 'completed', 'timed_out'));
+    deliver('check_run', checkRunPayload(2, 'completed', 'some_new_conclusion'));
+    deliver('status', statusPayload(3, 'error'));
+
+    expect(emitted.map((e) => [(e.data as CiStatusChanged).to, (e.data as CiStatusChanged).detail])).toEqual([
+      ['running', 'in_progress'],
+      ['failure', 'timed_out'],
+      ['failure', 'error'],
+    ]);
+  });
+
+  it('reports a check only when its CiState changes', () => {
+    const { emitted, deliver } = started();
+
+    deliver('check_run', checkRunPayload(1, 'queued'));
+    expect(deliver('check_run', checkRunPayload(1, 'waiting')).message).toBe('no change');
+
+    expect(emitted).toHaveLength(1);
+  });
+
+  it('names the repository by host, so the same path on two hosts stays apart', () => {
+    const { emitted, deliver } = started();
+
+    deliver('status', { ...statusPayload(1, 'success'), repository: { full_name: 'o/r', html_url: 'https://ghe.example.com/o/r' } });
+
+    expect(emitted[0]!.subject.key).toBe(`ghe.example.com/o/r@${SHA}`);
   });
 
   it('keeps the check name, which third parties write, out of data', () => {
@@ -126,8 +160,8 @@ describe('GitHubSource', () => {
       deliver('pull_request', pullRequestPayload('synchronize', NEW, OLD));
 
       expect(emitted.map((e) => [e.kind, e.subject, e.data])).toEqual([
-        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'o/r#7' }, { repository: 'o/r', number: 7, from: null, to: OLD, url: 'https://github.com/o/r/pull/7' }],
-        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'o/r#7' }, { repository: 'o/r', number: 7, from: OLD, to: NEW, url: 'https://github.com/o/r/pull/7' }],
+        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'github.com/o/r#7' }, { repository: 'github.com/o/r', number: 7, from: null, to: OLD, url: 'https://github.com/o/r/pull/7' }],
+        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'github.com/o/r#7' }, { repository: 'github.com/o/r', number: 7, from: OLD, to: NEW, url: 'https://github.com/o/r/pull/7' }],
       ]);
     });
 
@@ -139,9 +173,9 @@ describe('GitHubSource', () => {
       deliver('pull_request', pullRequestPayload('synchronize', OLD, NEW));
 
       expect(emitted.map((e) => e.id)).toEqual([
-        `github:pull_request:o/r#7:${OLD}..${NEW}`,
-        `github:pull_request:o/r#7:${OLD}..${NEW}`,
-        `github:pull_request:o/r#7:${NEW}..${OLD}`,
+        `github:pull_request:github.com/o/r#7:${OLD}..${NEW}`,
+        `github:pull_request:github.com/o/r#7:${OLD}..${NEW}`,
+        `github:pull_request:github.com/o/r#7:${NEW}..${OLD}`,
       ]);
       expect((emitted[2]!.data as PrHeadChanged).to).toBe(OLD);
     });
@@ -166,7 +200,7 @@ describe('GitHubSource', () => {
       deliver('check_run', checkRunPayload(1, 'completed', 'success'));
       expect(deliver('check_run', checkRunPayload(1, 'in_progress')).message).toBe('stale');
 
-      expect(states(emitted)).toEqual([[null, 'queued'], ['queued', 'success']]);
+      expect(states(emitted)).toEqual([[null, 'pending'], ['pending', 'success']]);
     });
 
     it('drops an earlier run of the same check, but reports a re-run', () => {
@@ -176,7 +210,7 @@ describe('GitHubSource', () => {
       expect(deliver('check_run', checkRunPayload(1, 'completed', 'success')).message).toBe('stale');
       deliver('check_run', checkRunPayload(3, 'queued'));
 
-      expect(states(emitted)).toEqual([[null, 'failure'], ['failure', 'queued']]);
+      expect(states(emitted)).toEqual([[null, 'failure'], ['failure', 'pending']]);
     });
 
     it('drops a commit status older than the last one', () => {
@@ -191,8 +225,8 @@ describe('GitHubSource', () => {
 
   it('ignores events it does not turn into changes', () => {
     const { emitted, deliver } = started();
-    expect(deliver('ping', { zen: 'hi', repository: { full_name: 'o/r' } })).toEqual({ status: 202, message: 'ignored' });
-    expect(deliver('check_run', { repository: { full_name: 'o/r' }, check_run: { id: 1 } }).message).toBe('ignored');
+    expect(deliver('ping', { zen: 'hi', repository: REPOSITORY })).toEqual({ status: 202, message: 'ignored' });
+    expect(deliver('check_run', { repository: REPOSITORY, check_run: { id: 1 } }).message).toBe('ignored');
     expect(emitted).toEqual([]);
   });
 

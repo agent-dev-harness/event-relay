@@ -6,6 +6,7 @@ import path from 'node:path';
 const entryPoints = [
     'src/index.ts',
     'src/contract.ts',
+    'src/kinds/index.ts',
     'src/sources/github/index.ts',
 ];
 
