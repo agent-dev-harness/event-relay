@@ -93,7 +93,6 @@ export class GitHubSource implements Source {
     const trackingKey = JSON.stringify([subjectKey, observation.check, observation.name]);
     const from = this.lastStates.get(trackingKey) ?? null;
     if (from === observation.state) return { status: 202, message: 'no change' };
-    this.lastStates.set(trackingKey, observation.state);
 
     const observedAt = new Date().toISOString();
     const event: RelayEvent<CiStatusChanged> = {
@@ -114,6 +113,7 @@ export class GitHubSource implements Source {
       untrusted: { name: observation.name },
     };
     context.emit(event);
+    this.lastStates.set(trackingKey, observation.state);
     return { status: 202, message: 'accepted' };
   }
 

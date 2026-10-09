@@ -85,6 +85,26 @@ describe('GitHubSource', () => {
     ]);
   });
 
+  it('still reports a change whose emit threw when it is redelivered', () => {
+    const source = new GitHubSource({ webhookSecret: SECRET });
+    const emitted: RelayEvent[] = [];
+    let fail = true;
+    source.start({
+      emit: (e) => {
+        if (fail) throw new Error('relay refused');
+        emitted.push(e);
+      },
+      signal: new AbortController().signal,
+    });
+    const body = Buffer.from(JSON.stringify(statusPayload(1, 'pending')));
+
+    expect(() => source.receive({ eventName: 'status', signature: sign(body), body })).toThrow('relay refused');
+    fail = false;
+    source.receive({ eventName: 'status', signature: sign(body), body });
+
+    expect(emitted).toHaveLength(1);
+  });
+
   it('ignores events it does not turn into changes', () => {
     const { emitted, deliver } = started();
     expect(deliver('ping', { zen: 'hi', repository: { full_name: 'o/r' } })).toEqual({ status: 202, message: 'ignored' });

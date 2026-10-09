@@ -28,9 +28,10 @@ const subjectKey = (subject: Subject): string => JSON.stringify([subject.type, s
 const ALL_SUBJECTS_KEY = subjectKey(ALL_SUBJECTS);
 
 /**
- * One subscriber's bounded queue and delivery loop. At most one delivery is in
- * flight, and deliveries are at least `minIntervalMs` apart; events arriving in
- * between wait, coalesce, and overflow into gaps.
+ * One subscriber's bounded queue and delivery loop. Deliveries start at least
+ * `minIntervalMs` apart, and one starts only once the previous one settled or
+ * timed out; events arriving in between wait, coalesce, and overflow into gaps.
+ * Timing uses performance.now(), so wall-clock jumps don't stall or expire it.
  */
 export class Subscription {
   private readonly queue = new Map<string, Queued>();
@@ -62,10 +63,9 @@ export class Subscription {
     return true;
   }
 
-  enqueue(event: RelayEvent, spec: KindSpec): void {
-    const coalesceKey = spec.coalesceKey(event);
+  enqueue(event: RelayEvent, spec: KindSpec, coalesceKey: string | null): void {
     const queueKey = coalesceKey === null ? `id:${event.id}` : `key:${spec.kind}:${coalesceKey}`;
-    const entry: Queued = { event, spec, enqueuedAt: Date.now() };
+    const entry: Queued = { event, spec, enqueuedAt: performance.now() };
 
     if (this.queue.has(queueKey)) {
       this.queue.delete(queueKey);
@@ -128,7 +128,7 @@ export class Subscription {
   private schedule(): void {
     if (this.cancelled || this.delivering || this.timer !== undefined) return;
     if (this.queue.size === 0 && this.gaps.size === 0) return;
-    const wait = Math.max(0, this.lastDeliveryAt + this.minIntervalMs - Date.now());
+    const wait = Math.max(0, this.lastDeliveryAt + this.minIntervalMs - performance.now());
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.flush();
@@ -137,7 +137,7 @@ export class Subscription {
 
   private async flush(): Promise<void> {
     if (this.cancelled) return;
-    const now = Date.now();
+    const now = performance.now();
     const events: RelayEvent[] = [];
     for (const { event, spec, enqueuedAt } of this.queue.values()) {
       if (spec.ttlMs !== undefined && now - enqueuedAt > spec.ttlMs) {
@@ -147,7 +147,8 @@ export class Subscription {
       }
     }
     this.queue.clear();
-    const gapEvents = [...this.gaps.values()].map((gap) => this.toGapEvent(gap, now));
+    const at = new Date().toISOString();
+    const gapEvents = [...this.gaps.values()].map((gap) => this.toGapEvent(gap, at));
     this.gaps.clear();
 
     const batch: RelayEvent[] = [...gapEvents, ...events];
@@ -155,21 +156,27 @@ export class Subscription {
 
     this.delivering = true;
     this.lastDeliveryAt = now;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await this.sink.deliver(batch);
+      await Promise.race([
+        this.sink.deliver(batch),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('delivery timed out')), this.limits.deliveryTimeoutMs);
+        }),
+      ]);
     } catch {
       if (!this.cancelled) {
         for (const gap of gapEvents) this.recordGap(gap.subject, gap.data.kinds, gap.data.dropped, [...gap.data.reasons, 'delivery-failed']);
         for (const event of events) this.recordGap(event.subject, [event.kind], 1, ['delivery-failed']);
       }
     } finally {
+      clearTimeout(timeout);
       this.delivering = false;
       this.schedule();
     }
   }
 
-  private toGapEvent(gap: PendingGap, now: number): GapEvent {
-    const at = new Date(now).toISOString();
+  private toGapEvent(gap: PendingGap, at: string): GapEvent {
     return {
       id: `${GAP_KIND}:${this.id}:${++this.gapSeq}`,
       kind: GAP_KIND,
