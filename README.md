@@ -56,32 +56,48 @@ Delivery is best effort: events can arrive late or out of order. Compare `occurr
 |---|---|
 | `@agent-dev-harness/event-relay` | `Relay`, `RelayLimits`, `DEFAULT_LIMITS`, and everything in `./contract` |
 | `@agent-dev-harness/event-relay/contract` | `RelayEvent`, `Subject`, `KindSpec`, `Source`, `SourceContext`, `Sink`, `SubscriptionFilter`, `SubscriptionOptions`, `GapEvent`, `GapData`, `GapReason`, `GAP_KIND`, `ALL_SUBJECTS` |
-| `@agent-dev-harness/event-relay/github` | `GitHubSource`, `CI_STATUS_CHANGED`, `CiStatusChanged` |
+| `@agent-dev-harness/event-relay/github` | `GitHubSource`, `CI_STATUS_CHANGED`, `CiStatusChanged`, `PR_HEAD_CHANGED`, `PrHeadChanged` |
 
 ```ts
 import { createServer } from "node:http";
 import { Relay } from "@agent-dev-harness/event-relay";
-import { CI_STATUS_CHANGED, GitHubSource } from "@agent-dev-harness/event-relay/github";
+import {
+  CI_STATUS_CHANGED, GitHubSource, PR_HEAD_CHANGED, type PrHeadChanged,
+} from "@agent-dev-harness/event-relay/github";
 
 const relay = new Relay();
 const github = new GitHubSource({ webhookSecret: process.env.GITHUB_WEBHOOK_SECRET! });
 await relay.addSource(github);
 createServer(github.handler).listen(8080);
 
-relay.subscribe("pr-123", {
-  filter: { kinds: [CI_STATUS_CHANGED], subjects: [{ type: "commit", key: `owner/repo@${headSha}` }] },
-  sink: { deliver: async (batch) => console.log(batch) },
-});
+// Follow PR #123's CI across pushes: each new head moves the CI filter to that commit.
+const pr = { type: "pull_request", key: "owner/repo#123" };
+const follow = (headSha: string) =>
+  relay.subscribe("pr-123", {
+    filter: {
+      kinds: [PR_HEAD_CHANGED, CI_STATUS_CHANGED],
+      subjects: [pr, { type: "commit", key: `owner/repo@${headSha}` }],
+    },
+    sink: {
+      deliver: async (batch) => {
+        for (const event of batch) {
+          if (event.kind === PR_HEAD_CHANGED) follow((event.data as PrHeadChanged).to);
+        }
+        console.log(batch);
+      },
+    },
+  });
+follow(currentHeadSha);
 ```
 
-Calling `subscribe` again with the same id changes that subscription, for example to follow a
-new head commit; `cancel(id)` ends it.
+Calling `subscribe` again with the same id changes that subscription; `cancel(id)` ends it.
 
 ### Event kinds
 
 | Kind | Source | Subject | Coalesces per |
 |---|---|---|---|
 | `ci.status_changed` | GitHub `check_run` and `status` webhooks | `commit`, `<owner>/<repo>@<sha>` | commit and check |
+| `pr.head_changed` | GitHub `pull_request` webhooks (opened, reopened, synchronize) | `pull_request`, `<owner>/<repo>#<number>` | PR |
 | `relay.gap` | the relay | the subject events were lost for | never; at most one per subject per batch |
 
 ## Development

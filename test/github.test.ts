@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, GitHubSource, type CiStatusChanged } from '../src/sources/github/index';
+import { CI_STATUS_CHANGED, GitHubSource, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/sources/github/index';
 
 const SECRET = 'test-secret';
 const SHA = 'a'.repeat(40);
@@ -32,6 +32,16 @@ function checkRunPayload(id: number, status: string, conclusion: string | null =
 
 function statusPayload(id: number, state: string) {
   return { id, sha: SHA, context: 'ci/legacy', state, target_url: null, updated_at: '2026-01-01T00:00:00Z', repository: { full_name: 'o/r' } };
+}
+
+function pullRequestPayload(action: string, head: string, before?: string) {
+  return {
+    action,
+    number: 7,
+    ...(before === undefined ? {} : { before, after: head }),
+    pull_request: { number: 7, head: { sha: head, ref: 'feature' }, updated_at: '2026-01-01T00:00:00Z', html_url: 'https://github.com/o/r/pull/7' },
+    repository: { full_name: 'o/r' },
+  };
 }
 
 function started(options: { maxPayloadBytes?: number } = {}) {
@@ -103,6 +113,47 @@ describe('GitHubSource', () => {
     source.receive({ eventName: 'status', signature: sign(body), body });
 
     expect(emitted).toHaveLength(1);
+  });
+
+  describe('pr.head_changed', () => {
+    const OLD = 'b'.repeat(40);
+    const NEW = 'c'.repeat(40);
+
+    it('reports the head of an opened PR, then each push to it', () => {
+      const { emitted, deliver } = started();
+
+      deliver('pull_request', pullRequestPayload('opened', OLD));
+      deliver('pull_request', pullRequestPayload('synchronize', NEW, OLD));
+
+      expect(emitted.map((e) => [e.kind, e.subject, e.data])).toEqual([
+        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'o/r#7' }, { repository: 'o/r', number: 7, from: null, to: OLD, url: 'https://github.com/o/r/pull/7' }],
+        [PR_HEAD_CHANGED, { type: 'pull_request', key: 'o/r#7' }, { repository: 'o/r', number: 7, from: OLD, to: NEW, url: 'https://github.com/o/r/pull/7' }],
+      ]);
+    });
+
+    it('gives a redelivered push the same id, and a push back to an earlier head a new one', () => {
+      const { emitted, deliver } = started();
+
+      deliver('pull_request', pullRequestPayload('synchronize', NEW, OLD));
+      deliver('pull_request', pullRequestPayload('synchronize', NEW, OLD));
+      deliver('pull_request', pullRequestPayload('synchronize', OLD, NEW));
+
+      expect(emitted.map((e) => e.id)).toEqual([
+        `github:pull_request:o/r#7:${OLD}..${NEW}`,
+        `github:pull_request:o/r#7:${OLD}..${NEW}`,
+        `github:pull_request:o/r#7:${NEW}..${OLD}`,
+      ]);
+      expect((emitted[2]!.data as PrHeadChanged).to).toBe(OLD);
+    });
+
+    it('ignores pull_request actions that do not move the head', () => {
+      const { emitted, deliver } = started();
+
+      expect(deliver('pull_request', pullRequestPayload('edited', OLD)).message).toBe('ignored');
+      expect(deliver('pull_request', pullRequestPayload('closed', OLD)).message).toBe('ignored');
+      expect(deliver('pull_request', pullRequestPayload('synchronize', OLD, OLD)).message).toBe('no change');
+      expect(emitted).toEqual([]);
+    });
   });
 
   it('ignores events it does not turn into changes', () => {

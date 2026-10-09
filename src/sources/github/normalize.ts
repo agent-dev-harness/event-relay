@@ -71,3 +71,36 @@ export function readCiObservation(eventName: string, payload: unknown): CiObserv
 
   return null;
 }
+
+/** A PR's head commit as of a `pull_request` webhook that can change it. */
+export interface PrHeadObservation {
+  repository: string;
+  number: number;
+  /** The head before this payload: `before` on a push to the PR, else null. */
+  before: string | null;
+  sha: string;
+  occurredAt: string | null;
+  url: string | null;
+}
+
+const HEAD_ACTIONS: ReadonlySet<string> = new Set(['opened', 'reopened', 'synchronize']);
+
+/** Returns null for payloads that don't set a PR's head, or lack a field this needs. */
+export function readPrHeadObservation(eventName: string, payload: unknown): PrHeadObservation | null {
+  if (eventName !== 'pull_request' || !isObject(payload) || !isObject(payload.repository)) return null;
+  const action = str(payload, 'action');
+  if (action === null || !HEAD_ACTIONS.has(action) || !isObject(payload.pull_request)) return null;
+  const pr = payload.pull_request;
+  const repository = str(payload.repository, 'full_name');
+  const number = num(pr, 'number');
+  const sha = isObject(pr.head) ? str(pr.head, 'sha') : null;
+  if (repository === null || number === null || sha === null) return null;
+  return {
+    repository,
+    number,
+    before: action === 'synchronize' ? str(payload, 'before') : null,
+    sha,
+    occurredAt: str(pr, 'updated_at'),
+    url: str(pr, 'html_url'),
+  };
+}
