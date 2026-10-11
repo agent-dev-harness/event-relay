@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ObservationOutcome, ScmObserver, ScmProvider } from '../scm/provider';
-import { readCiObservation, readPrHeadObservation } from './normalize';
+import { readCiObservation, readPrClosedObservation, readPrHeadObservation } from './normalize';
 
 export interface GitHubProviderOptions {
   webhookSecret: string;
@@ -25,8 +25,8 @@ export interface WebhookResponse {
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
 
 /**
- * Turns GitHub `check_run`, `status` and `pull_request` webhooks into
- * observations for an ScmSource. Host `handler` on an HTTP server, or pass
+ * Turns GitHub `check_run`, `status` and `pull_request` (opened, reopened,
+ * synchronize, closed) webhooks into observations for an ScmSource. Host `handler` on an HTTP server, or pass
  * deliveries to `receive` yourself.
  */
 export class GitHubProvider implements ScmProvider {
@@ -64,6 +64,8 @@ export class GitHubProvider implements ScmProvider {
     if (ci) return { status: 202, message: observer.ci(ci) };
     const prHead = readPrHeadObservation(delivery.eventName, payload);
     if (prHead) return { status: 202, message: observer.prHead(prHead) };
+    const prClosed = readPrClosedObservation(delivery.eventName, payload);
+    if (prClosed) return { status: 202, message: observer.prClosed(prClosed) };
     return { status: 202, message: 'ignored' };
   }
 

@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/kinds/index';
-import { ScmSource, type CiObservation, type PrHeadObservation, type ScmObserver, type ScmProvider } from '../src/sources/scm/index';
+import { CI_STATUS_CHANGED, PR_CLOSED, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/kinds/index';
+import {
+  ScmSource,
+  type CiObservation,
+  type PrClosedObservation,
+  type PrHeadObservation,
+  type ScmObserver,
+  type ScmProvider,
+} from '../src/sources/scm/index';
 
 class FakeProvider implements ScmProvider {
   readonly id = 'fake';
@@ -32,6 +39,10 @@ function ci(overrides: Partial<CiObservation> = {}): CiObservation {
 
 function prHead(overrides: Partial<PrHeadObservation> = {}): PrHeadObservation {
   return { repository: 'host.example/o/r', number: 7, before: null, sha: 'abc', occurredAt: null, url: null, ...overrides };
+}
+
+function prClosed(overrides: Partial<PrClosedObservation> = {}): PrClosedObservation {
+  return { repository: 'host.example/o/r', number: 7, merged: true, sha: 'abc', closedAt: '2026-01-02T00:00:00Z', url: null, ...overrides };
 }
 
 function started(options: { maxTrackedChecks?: number } = {}, emit?: (event: RelayEvent) => void) {
@@ -149,6 +160,31 @@ describe('ScmSource', () => {
       expect(observer.prHead(prHead({ before: 'abc', sha: 'abc' }))).toBe('no change');
 
       expect(emitted).toEqual([]);
+    });
+  });
+
+  describe('pr.closed', () => {
+    it('reports a merged or closed PR with the head it closed on', () => {
+      const { observer, emitted } = started();
+
+      expect(observer.prClosed(prClosed())).toBe('accepted');
+
+      expect(emitted[0]).toMatchObject({
+        id: 'fake:pull_request:host.example/o/r#7:closed@2026-01-02T00:00:00Z',
+        kind: PR_CLOSED,
+        subject: { type: 'pull_request', key: 'host.example/o/r#7' },
+        occurredAt: '2026-01-02T00:00:00Z',
+        data: { repository: 'host.example/o/r', number: 7, merged: true, head: 'abc', url: null },
+      });
+    });
+
+    it('gives a second close after a reopen its own id', () => {
+      const { observer, emitted } = started();
+
+      observer.prClosed(prClosed({ merged: false }));
+      observer.prClosed(prClosed({ closedAt: '2026-01-03T00:00:00Z' }));
+
+      expect(new Set(emitted.map((e) => e.id)).size).toBe(2);
     });
   });
 });

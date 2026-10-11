@@ -35,12 +35,26 @@ export interface PrHeadObservation {
   url: string | null;
 }
 
+/** A pull request that was merged or closed, as a provider reports it. */
+export interface PrClosedObservation {
+  /** `<host>/<path>`. */
+  repository: string;
+  number: number;
+  merged: boolean;
+  /** The head commit when it closed. */
+  sha: string;
+  /** When it closed; tells a second close after a reopen apart from a redelivered one. */
+  closedAt: string;
+  url: string | null;
+}
+
 /** What ScmSource did with an observation. */
 export type ObservationOutcome = 'accepted' | 'no change' | 'stale';
 
 export interface ScmObserver {
   ci(observation: CiObservation): ObservationOutcome;
   prHead(observation: PrHeadObservation): ObservationOutcome;
+  prClosed(observation: PrClosedObservation): ObservationOutcome;
 }
 
 /**

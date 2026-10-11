@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/kinds/index';
+import { CI_STATUS_CHANGED, PR_CLOSED, PR_HEAD_CHANGED, type CiStatusChanged, type PrClosed, type PrHeadChanged } from '../src/kinds/index';
 import { GitHubProvider } from '../src/sources/github/index';
 import { ScmSource } from '../src/sources/scm/index';
 
@@ -162,11 +162,21 @@ describe('GitHubProvider', () => {
       expect((emitted[2]!.data as PrHeadChanged).to).toBe(OLD);
     });
 
-    it('ignores pull_request actions that do not move the head', () => {
+    it('reports a closed PR as pr.closed, with whether it merged', () => {
+      const { emitted, deliver } = started();
+      const payload = pullRequestPayload('closed', OLD);
+
+      deliver('pull_request', { ...payload, pull_request: { ...payload.pull_request, merged: true, closed_at: '2026-01-02T00:00:00Z' } });
+
+      expect(emitted.map((e) => [e.kind, e.data as PrClosed])).toEqual([
+        [PR_CLOSED, { repository: 'github.com/o/r', number: 7, merged: true, head: OLD, url: 'https://github.com/o/r/pull/7' }],
+      ]);
+    });
+
+    it('ignores pull_request actions that do not move the head or close the PR', () => {
       const { emitted, deliver } = started();
 
       expect(deliver('pull_request', pullRequestPayload('edited', OLD)).message).toBe('ignored');
-      expect(deliver('pull_request', pullRequestPayload('closed', OLD)).message).toBe('ignored');
       expect(deliver('pull_request', pullRequestPayload('synchronize', OLD, OLD)).message).toBe('no change');
       expect(emitted).toEqual([]);
     });
