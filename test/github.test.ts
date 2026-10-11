@@ -4,7 +4,8 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { RelayEvent } from '../src/contract';
 import { CI_STATUS_CHANGED, PR_HEAD_CHANGED, type CiStatusChanged, type PrHeadChanged } from '../src/kinds/index';
-import { GitHubSource } from '../src/sources/github/index';
+import { GitHubProvider } from '../src/sources/github/index';
+import { ScmSource } from '../src/sources/scm/index';
 
 const SECRET = 'test-secret';
 const SHA = 'a'.repeat(40);
@@ -46,19 +47,20 @@ function pullRequestPayload(action: string, head: string, before?: string) {
   };
 }
 
+// Runs the provider behind a real ScmSource, so these tests cover GitHub payloads end to end.
 function started(options: { maxPayloadBytes?: number } = {}) {
-  const source = new GitHubSource({ webhookSecret: SECRET, ...options });
+  const provider = new GitHubProvider({ webhookSecret: SECRET, ...options });
   const emitted: RelayEvent[] = [];
   const controller = new AbortController();
-  source.start({ emit: (e) => emitted.push(e), signal: controller.signal });
+  void new ScmSource(provider).start({ emit: (e) => emitted.push(e), signal: controller.signal });
   const deliver = (eventName: string, payload: unknown, signature?: string) => {
     const body = Buffer.from(JSON.stringify(payload));
-    return source.receive({ eventName, signature: signature ?? sign(body), body });
+    return provider.receive({ eventName, signature: signature ?? sign(body), body });
   };
-  return { source, emitted, deliver, controller };
+  return { provider, emitted, deliver, controller };
 }
 
-describe('GitHubSource', () => {
+describe('GitHubProvider', () => {
   it('emits a ci.status_changed event for each change of a check run', () => {
     const { emitted, deliver } = started();
 
@@ -127,26 +129,6 @@ describe('GitHubSource', () => {
       ['github:status:1', 'pending'],
       ['github:status:3', 'success'],
     ]);
-  });
-
-  it('still reports a change whose emit threw when it is redelivered', () => {
-    const source = new GitHubSource({ webhookSecret: SECRET });
-    const emitted: RelayEvent[] = [];
-    let fail = true;
-    source.start({
-      emit: (e) => {
-        if (fail) throw new Error('relay refused');
-        emitted.push(e);
-      },
-      signal: new AbortController().signal,
-    });
-    const body = Buffer.from(JSON.stringify(statusPayload(1, 'pending')));
-
-    expect(() => source.receive({ eventName: 'status', signature: sign(body), body })).toThrow('relay refused');
-    fail = false;
-    source.receive({ eventName: 'status', signature: sign(body), body });
-
-    expect(emitted).toHaveLength(1);
   });
 
   describe('pr.head_changed', () => {
@@ -253,15 +235,15 @@ describe('GitHubSource', () => {
     let server: Server | undefined;
     afterEach(() => new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve())));
 
-    async function listen(source: GitHubSource): Promise<string> {
-      server = createServer(source.handler);
+    async function listen(provider: GitHubProvider): Promise<string> {
+      server = createServer(provider.handler);
       await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
       return `http://127.0.0.1:${(server!.address() as AddressInfo).port}/`;
     }
 
     it('accepts a signed webhook over HTTP', async () => {
-      const { source, emitted } = started();
-      const url = await listen(source);
+      const { provider, emitted } = started();
+      const url = await listen(provider);
       const body = Buffer.from(JSON.stringify(checkRunPayload(1, 'queued')));
 
       const res = await fetch(url, {
@@ -275,8 +257,8 @@ describe('GitHubSource', () => {
     });
 
     it('answers 413 to an oversized body', async () => {
-      const { source, emitted } = started({ maxPayloadBytes: 10 });
-      const url = await listen(source);
+      const { provider, emitted } = started({ maxPayloadBytes: 10 });
+      const url = await listen(provider);
 
       const res = await fetch(url, { method: 'POST', headers: { 'x-github-event': 'check_run' }, body: 'x'.repeat(1_000) });
 

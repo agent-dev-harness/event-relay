@@ -1,26 +1,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RelayEvent, Source, SourceContext } from '../../contract';
-import { BoundedLru } from '../../core/boundedLru';
-import {
-  CI_STATUS_CHANGED,
-  ciStatusChangedSpec,
-  commitSubject,
-  PR_HEAD_CHANGED,
-  prHeadChangedSpec,
-  pullRequestSubject,
-  type CiState,
-  type CiStatusChanged,
-  type PrHeadChanged,
-} from '../../kinds';
-import { readCiObservation, readPrHeadObservation, type CiObservation, type PrHeadObservation } from './normalize';
+import type { ObservationOutcome, ScmObserver, ScmProvider } from '../scm/provider';
+import { readCiObservation, readPrHeadObservation } from './normalize';
 
-export interface GitHubSourceOptions {
+export interface GitHubProviderOptions {
   webhookSecret: string;
   /** Bodies larger than this are refused before they are parsed. */
   maxPayloadBytes?: number;
-  /** Checks whose last state is remembered to suppress repeats. */
-  maxTrackedChecks?: number;
 }
 
 export interface WebhookDelivery {
@@ -33,45 +19,37 @@ export interface WebhookDelivery {
 
 export interface WebhookResponse {
   status: number;
-  message: string;
+  message: ObservationOutcome | 'ignored' | 'source is not running' | 'payload too large' | 'bad signature' | 'body is not JSON' | 'POST only';
 }
 
-const isBefore = (a: CiObservation['order'], b: CiObservation['order']): boolean => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
-
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
-const DEFAULT_MAX_TRACKED_CHECKS = 10_000;
 
 /**
- * Emits `ci.status_changed` from GitHub `check_run` and `status` webhooks, and
- * `pr.head_changed` from `pull_request` webhooks. Host
- * `handler` on an HTTP server, or pass deliveries to `receive` yourself.
- *
- * A check is reported only when its CiState changes, and an update older than
- * the last one reported for that check is dropped, so a late `in_progress`
- * never follows its `completed`.
+ * Turns GitHub `check_run`, `status` and `pull_request` webhooks into
+ * observations for an ScmSource. Host `handler` on an HTTP server, or pass
+ * deliveries to `receive` yourself.
  */
-export class GitHubSource implements Source {
+export class GitHubProvider implements ScmProvider {
   readonly id = 'github';
-  readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec];
   private readonly secret: string;
   private readonly maxPayloadBytes: number;
-  private readonly lastStates: BoundedLru<string, { state: CiState; order: CiObservation['order'] }>;
-  private context: SourceContext | undefined;
+  private observer: ScmObserver | undefined;
+  private signal: AbortSignal | undefined;
 
-  constructor(options: GitHubSourceOptions) {
+  constructor(options: GitHubProviderOptions) {
     if (options.webhookSecret === '') throw new Error('webhookSecret must not be empty');
     this.secret = options.webhookSecret;
     this.maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
-    this.lastStates = new BoundedLru(options.maxTrackedChecks ?? DEFAULT_MAX_TRACKED_CHECKS);
   }
 
-  start(context: SourceContext): void {
-    this.context = context;
+  start(observer: ScmObserver, signal: AbortSignal): void {
+    this.observer = observer;
+    this.signal = signal;
   }
 
   receive(delivery: WebhookDelivery): WebhookResponse {
-    const context = this.context;
-    if (!context || context.signal.aborted) return { status: 503, message: 'source is not running' };
+    const observer = this.observer;
+    if (!observer || this.signal?.aborted) return { status: 503, message: 'source is not running' };
     if (delivery.body.length > this.maxPayloadBytes) return { status: 413, message: 'payload too large' };
     if (!this.hasValidSignature(delivery)) return { status: 401, message: 'bad signature' };
 
@@ -83,67 +61,10 @@ export class GitHubSource implements Source {
     }
 
     const ci = readCiObservation(delivery.eventName, payload);
-    if (ci) return this.emitCiChange(context, ci);
+    if (ci) return { status: 202, message: observer.ci(ci) };
     const prHead = readPrHeadObservation(delivery.eventName, payload);
-    if (prHead) return this.emitPrHeadChange(context, prHead);
+    if (prHead) return { status: 202, message: observer.prHead(prHead) };
     return { status: 202, message: 'ignored' };
-  }
-
-  private emitCiChange(context: SourceContext, observation: CiObservation): WebhookResponse {
-    const subject = commitSubject(observation.repository, observation.sha);
-    const trackingKey = JSON.stringify([subject.key, observation.check, observation.name]);
-    const last = this.lastStates.get(trackingKey);
-    if (last && isBefore(observation.order, last.order)) return { status: 202, message: 'stale' };
-    const from = last?.state ?? null;
-    if (from === observation.state) {
-      this.lastStates.set(trackingKey, { state: observation.state, order: observation.order });
-      return { status: 202, message: 'no change' };
-    }
-
-    const observedAt = new Date().toISOString();
-    const event: RelayEvent<CiStatusChanged> = {
-      id: `github:${observation.deliveryKey}`,
-      kind: CI_STATUS_CHANGED,
-      subject,
-      occurredAt: observation.occurredAt ?? observedAt,
-      observedAt,
-      data: {
-        repository: observation.repository,
-        sha: observation.sha,
-        check: observation.check,
-        from,
-        to: observation.state,
-        detail: observation.detail,
-        url: observation.url,
-      },
-      untrusted: { name: observation.name },
-    };
-    context.emit(event);
-    this.lastStates.set(trackingKey, { state: observation.state, order: observation.order });
-    return { status: 202, message: 'accepted' };
-  }
-
-  private emitPrHeadChange(context: SourceContext, observation: PrHeadObservation): WebhookResponse {
-    if (observation.before === observation.sha) return { status: 202, message: 'no change' };
-    const subject = pullRequestSubject(observation.repository, observation.number);
-    const observedAt = new Date().toISOString();
-    const event: RelayEvent<PrHeadChanged> = {
-      id: `github:pull_request:${subject.key}:${observation.before ?? 'none'}..${observation.sha}`,
-      kind: PR_HEAD_CHANGED,
-      subject,
-      occurredAt: observation.occurredAt ?? observedAt,
-      observedAt,
-      data: {
-        repository: observation.repository,
-        number: observation.number,
-        from: observation.before,
-        to: observation.sha,
-        url: observation.url,
-      },
-      untrusted: {},
-    };
-    context.emit(event);
-    return { status: 202, message: 'accepted' };
   }
 
   /** A node:http request handler for the webhook endpoint. It stops reading a body once it passes maxPayloadBytes. */

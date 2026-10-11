@@ -28,6 +28,7 @@ Source → emit → dedupe → match subscriptions → per-subscriber queue (coa
 |---|---|
 | **Contract** (`src/contract.ts`) | `RelayEvent`, `KindSpec`, `Source`, `Sink`. It imports nothing, so consumers can use it without loading the relay. |
 | **Sources** (`src/sources/<name>/`) | Each source owns how its events arrive (webhook, polling, …) and turns them into changes of the kinds it declares: a redelivered payload or a repeat of the current state produces no event. Text written by third parties goes in `untrusted`, never in `data`. |
+| **Code host providers** | `ScmSource` (`src/sources/scm/`) is the source for code hosts: it emits `ci.status_changed` and `pr.head_changed`, tracks each check's state and drops repeats and out-of-order updates. It gets provider-neutral observations from an `ScmProvider`, which is the only part that knows a host's payloads: `GitHubProvider` (`src/sources/github/`) verifies GitHub webhooks and turns them into observations. A provider must not import the core, and `ScmSource` must not import a provider. |
 | **Kinds** (`src/kinds/`) | Each kind's data shape, subject and `KindSpec`, defined once in provider-neutral terms, so consumers don't depend on a source and several sources can emit one kind. A `KindSpec` says whether events coalesce (a subscriber only gets the latest per key), which event goes when a queue is full, and how long an event may wait. Kinds import only the contract. |
 | **Core** (`src/core/`) | Subscriptions, delivery and resource limits. It must not import a kind or a source; `scripts/check-boundary.ts` enforces that, so provider details stay out of the core and a source can move to its own package without changing it. |
 
@@ -38,8 +39,9 @@ of subscriptions, events queued per subscriber, gap subjects per subscriber, eve
 event ids remembered for dedupe. Deliveries to one subscriber start at least `minDeliveryIntervalMs`
 apart, and the next one waits until the previous one has settled or run past `deliveryTimeoutMs`,
 which counts as a failed delivery. The relay refuses limits it can't enforce, such as `NaN`,
-`Infinity` or a cap of 0. Sources cap their own ingestion: `GitHubSource` refuses bodies over
-`maxPayloadBytes` before parsing them and remembers at most `maxTrackedChecks` check states.
+`Infinity` or a cap of 0. Sources cap their own ingestion: `GitHubProvider` refuses bodies over
+`maxPayloadBytes` before parsing them, and `ScmSource` remembers at most `maxTrackedChecks` check
+states.
 
 Nothing is dropped silently. When the relay drops an event (queue full, too large, expired, or
 the sink failed), the subscriber's next batch starts with a `relay.gap` event naming the subject
@@ -58,19 +60,21 @@ command: before acting on one, check the current state at its source.
 | `@agent-dev-harness/event-relay` | `Relay`, `RelayLimits`, `DEFAULT_LIMITS`, and everything in `./contract` |
 | `@agent-dev-harness/event-relay/contract` | `RelayEvent`, `Subject`, `KindSpec`, `Source`, `SourceContext`, `Sink`, `SubscriptionFilter`, `SubscriptionOptions`, `GapEvent`, `GapData`, `GapReason`, `GAP_KIND`, `ALL_SUBJECTS` |
 | `@agent-dev-harness/event-relay/kinds` | `CI_STATUS_CHANGED`, `CiStatusChanged`, `CiState`, `commitSubject`, `ciStatusChangedSpec`, `PR_HEAD_CHANGED`, `PrHeadChanged`, `pullRequestSubject`, `prHeadChangedSpec` |
-| `@agent-dev-harness/event-relay/github` | `GitHubSource` |
+| `@agent-dev-harness/event-relay/scm` | `ScmSource`, `ScmSourceOptions`, and the provider interface: `ScmProvider`, `ScmObserver`, `CiObservation`, `PrHeadObservation`, `ObservationOutcome` |
+| `@agent-dev-harness/event-relay/github` | `GitHubProvider`, `GitHubProviderOptions`, `WebhookDelivery`, `WebhookResponse` |
 
 ```ts
 import { createServer } from "node:http";
 import { Relay } from "@agent-dev-harness/event-relay";
-import { GitHubSource } from "@agent-dev-harness/event-relay/github";
+import { GitHubProvider } from "@agent-dev-harness/event-relay/github";
+import { ScmSource } from "@agent-dev-harness/event-relay/scm";
 import {
   CI_STATUS_CHANGED, commitSubject, PR_HEAD_CHANGED, pullRequestSubject, type PrHeadChanged,
 } from "@agent-dev-harness/event-relay/kinds";
 
 const relay = new Relay();
-const github = new GitHubSource({ webhookSecret: process.env.GITHUB_WEBHOOK_SECRET! });
-await relay.addSource(github);
+const github = new GitHubProvider({ webhookSecret: process.env.GITHUB_WEBHOOK_SECRET! });
+await relay.addSource(new ScmSource(github));
 createServer(github.handler).listen(8080);
 
 // Follow PR #123's CI across pushes: each new head moves the CI filter to that commit.
@@ -102,8 +106,8 @@ hosts names two repositories.
 
 | Kind | Emitted by | Subject | Coalesces per |
 |---|---|---|---|
-| `ci.status_changed` | GitHub `check_run` and `status` webhooks | `commitSubject`: `commit`, `<repository>@<sha>` | commit and check |
-| `pr.head_changed` | GitHub `pull_request` webhooks (opened, reopened, synchronize) | `pullRequestSubject`: `pull_request`, `<repository>#<number>` | PR |
+| `ci.status_changed` | `ScmSource`; from GitHub `check_run` and `status` webhooks via `GitHubProvider` | `commitSubject`: `commit`, `<repository>@<sha>` | commit and check |
+| `pr.head_changed` | `ScmSource`; from GitHub `pull_request` webhooks (opened, reopened, synchronize) via `GitHubProvider` | `pullRequestSubject`: `pull_request`, `<repository>#<number>` | PR |
 | `relay.gap` | the relay | the subject events were lost for | never; at most one per subject per batch |
 
 `ci.status_changed` reports each check as a `CiState` (`pending`, `running`, `success`,
