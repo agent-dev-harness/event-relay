@@ -7,13 +7,14 @@ const entryPoints = [
     'src/index.ts',
     'src/contract.ts',
     'src/kinds/index.ts',
+    'src/sources/scm/index.ts',
     'src/sources/github/index.ts',
 ];
 
 rmSync('dist', { recursive: true, force: true });
 
-// splitting keeps one copy of each module shared by the entrypoints (the
-// GitHub source uses core helpers) instead of bundling it into each of them.
+// splitting keeps one copy of each module shared by the entrypoints (ScmSource
+// uses core helpers) instead of bundling it into each of them.
 await build({
     entryPoints,
     outbase: 'src',

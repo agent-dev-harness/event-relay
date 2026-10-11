@@ -1,27 +1,5 @@
 import type { CiState } from '../../kinds';
-
-/** One CI check's state on one commit, read from a `check_run` or `status` webhook payload. */
-export interface CiObservation {
-  check: 'check_run' | 'status';
-  /** The check run's name or the commit status's context. Written by whoever posts the check. */
-  name: string;
-  /** `<host>/<owner>/<repo>`. */
-  repository: string;
-  sha: string;
-  state: CiState;
-  /** For a check run its status, or its conclusion once completed; for a commit status its state. */
-  detail: string;
-  /** Unique per payload, so a redelivery maps to the same event. */
-  deliveryKey: string;
-  /**
-   * Compared element by element, a later update of the same check is greater.
-   * GitHub's ids grow with each new check run or status, and one run goes
-   * queued → in_progress → completed.
-   */
-  order: readonly [id: number, step: number];
-  occurredAt: string | null;
-  url: string | null;
-}
+import type { CiObservation, PrHeadObservation } from '../scm/provider';
 
 type Json = Record<string, unknown>;
 
@@ -66,6 +44,8 @@ export function readCiObservation(eventName: string, payload: unknown): CiObserv
   const repository = repositoryId(payload.repository);
   if (repository === null) return null;
 
+  // A check run's step orders the updates of one run: queued, in_progress, completed.
+  // GitHub's ids grow with each new check run or status.
   if (eventName === 'check_run' && isObject(payload.check_run)) {
     const run = payload.check_run;
     const id = num(run, 'id');
@@ -109,18 +89,6 @@ export function readCiObservation(eventName: string, payload: unknown): CiObserv
   }
 
   return null;
-}
-
-/** A PR's head commit as of a `pull_request` webhook that can change it. */
-export interface PrHeadObservation {
-  /** `<host>/<owner>/<repo>`. */
-  repository: string;
-  number: number;
-  /** The head before this payload: `before` on a push to the PR, else null. */
-  before: string | null;
-  sha: string;
-  occurredAt: string | null;
-  url: string | null;
 }
 
 const HEAD_ACTIONS: ReadonlySet<string> = new Set(['opened', 'reopened', 'synchronize']);
