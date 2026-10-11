@@ -4,16 +4,19 @@ import {
   CI_STATUS_CHANGED,
   ciStatusChangedSpec,
   commitSubject,
+  PR_CLOSED,
   PR_HEAD_CHANGED,
+  prClosedSpec,
   prHeadChangedSpec,
   pullRequestSubject,
   type CiState,
   type CiStatusChanged,
+  type PrClosed,
   type PrHeadChanged,
 } from '../../kinds';
-import type { CiObservation, ObservationOutcome, PrHeadObservation, ScmProvider } from './provider';
+import type { CiObservation, ObservationOutcome, PrClosedObservation, PrHeadObservation, ScmProvider } from './provider';
 
-export type { CiObservation, ObservationOutcome, PrHeadObservation, ScmObserver, ScmProvider } from './provider';
+export type { CiObservation, ObservationOutcome, PrClosedObservation, PrHeadObservation, ScmObserver, ScmProvider } from './provider';
 
 export interface ScmSourceOptions {
   /** Checks whose last state is remembered to suppress repeats. */
@@ -25,8 +28,8 @@ const DEFAULT_MAX_TRACKED_CHECKS = 10_000;
 const isBefore = (a: CiObservation['order'], b: CiObservation['order']): boolean => a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
 
 /**
- * Emits `ci.status_changed` and `pr.head_changed` from a code host's
- * observations, whichever host the provider talks to.
+ * Emits `ci.status_changed`, `pr.head_changed` and `pr.closed` from a code
+ * host's observations, whichever host the provider talks to.
  *
  * A check is reported only when its CiState changes, and an update older than
  * the last one reported for that check is dropped, so a late `in_progress`
@@ -34,7 +37,7 @@ const isBefore = (a: CiObservation['order'], b: CiObservation['order']): boolean
  */
 export class ScmSource implements Source {
   readonly id: string;
-  readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec];
+  readonly kinds = [ciStatusChangedSpec, prHeadChangedSpec, prClosedSpec];
   private readonly lastStates: BoundedLru<string, { state: CiState; order: CiObservation['order'] }>;
 
   constructor(private readonly provider: ScmProvider, options: ScmSourceOptions = {}) {
@@ -44,7 +47,11 @@ export class ScmSource implements Source {
 
   start(context: SourceContext): void | Promise<void> {
     return this.provider.start(
-      { ci: (o) => this.onCi(context, o), prHead: (o) => this.onPrHead(context, o) },
+      {
+        ci: (o) => this.onCi(context, o),
+        prHead: (o) => this.onPrHead(context, o),
+        prClosed: (o) => this.onPrClosed(context, o),
+      },
       context.signal,
     );
   }
@@ -98,6 +105,27 @@ export class ScmSource implements Source {
         number: observation.number,
         from: observation.before,
         to: observation.sha,
+        url: observation.url,
+      },
+      untrusted: {},
+    };
+    context.emit(event);
+    return 'accepted';
+  }
+
+  private onPrClosed(context: SourceContext, observation: PrClosedObservation): ObservationOutcome {
+    const subject = pullRequestSubject(observation.repository, observation.number);
+    const event: RelayEvent<PrClosed> = {
+      id: `${this.id}:pull_request:${subject.key}:closed@${observation.closedAt}`,
+      kind: PR_CLOSED,
+      subject,
+      occurredAt: observation.closedAt,
+      observedAt: new Date().toISOString(),
+      data: {
+        repository: observation.repository,
+        number: observation.number,
+        merged: observation.merged,
+        head: observation.sha,
         url: observation.url,
       },
       untrusted: {},

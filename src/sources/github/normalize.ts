@@ -1,5 +1,5 @@
 import type { CiState } from '../../kinds';
-import type { CiObservation, PrHeadObservation } from '../scm/provider';
+import type { CiObservation, PrClosedObservation, PrHeadObservation } from '../scm/provider';
 
 type Json = Record<string, unknown>;
 
@@ -111,4 +111,17 @@ export function readPrHeadObservation(eventName: string, payload: unknown): PrHe
     occurredAt: str(pr, 'updated_at'),
     url: str(pr, 'html_url'),
   };
+}
+
+/** Returns null for payloads that don't close a PR, or lack a field this needs. */
+export function readPrClosedObservation(eventName: string, payload: unknown): PrClosedObservation | null {
+  if (eventName !== 'pull_request' || !isObject(payload) || !isObject(payload.repository)) return null;
+  if (str(payload, 'action') !== 'closed' || !isObject(payload.pull_request)) return null;
+  const pr = payload.pull_request;
+  const repository = repositoryId(payload.repository);
+  const number = num(pr, 'number');
+  const sha = isObject(pr.head) ? str(pr.head, 'sha') : null;
+  const closedAt = str(pr, 'closed_at');
+  if (repository === null || number === null || sha === null || closedAt === null) return null;
+  return { repository, number, merged: pr.merged === true, sha, closedAt, url: str(pr, 'html_url') };
 }

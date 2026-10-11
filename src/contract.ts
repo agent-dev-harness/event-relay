@@ -4,7 +4,7 @@
 export interface Subject {
   /** What the event is about, e.g. "commit" or "pull_request". */
   type: string;
-  /** Identifies one subject of that type, e.g. "owner/repo@<sha>". */
+  /** Identifies one subject of that type, e.g. "github.com/owner/repo@<sha>". */
   key: string;
 }
 

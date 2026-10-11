@@ -24,3 +24,26 @@ export const prHeadChangedSpec: KindSpec = {
   coalesceKey: (event) => event.subject.key,
   overflow: 'drop-oldest',
 };
+
+export const PR_CLOSED = 'pr.closed';
+
+/**
+ * `data` of a `pr.closed` event, sent when a pull request is merged or closed
+ * without merging. Its subject is `pullRequestSubject(repository, number)`. A PR
+ * reopened later sends `pr.head_changed` with `from: null`.
+ */
+export interface PrClosed {
+  /** `<host>/<path>`, e.g. "github.com/owner/repo". */
+  repository: string;
+  number: number;
+  merged: boolean;
+  /** The head commit when it closed. */
+  head: string;
+  url: string | null;
+}
+
+export const prClosedSpec: KindSpec = {
+  kind: PR_CLOSED,
+  coalesceKey: (event) => event.subject.key,
+  overflow: 'drop-oldest',
+};
