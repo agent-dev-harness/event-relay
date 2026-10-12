@@ -16,7 +16,6 @@ const BUILD_STATES: Readonly<Record<string, CiState>> = {
   canceled: 'cancelled',
 };
 
-const BUILD_STEPS: Readonly<Record<string, number>> = { none: 0, notStarted: 0, postponed: 0, inProgress: 1, cancelling: 2, completed: 3 };
 
 const STATUS_STATES: Readonly<Record<string, CiState>> = {
   notSet: 'pending',
@@ -38,6 +37,10 @@ export function readBuildObservation(repository: string, sha: string, build: Jso
   const name = isObject(build.definition) ? str(build.definition, 'name') : null;
   if (id === null || status === null || name === null) return null;
   const detail = status === 'completed' ? (str(build, 'result') ?? status) : status;
+  // A retry of failed stages reuses the build id and starts over at inProgress,
+  // so a build's updates are ordered by when they changed, not by status.
+  const changed = Date.parse(str(build, 'lastChangedDate') ?? '');
+  if (Number.isNaN(changed)) return null;
   return {
     repository,
     sha,
@@ -45,8 +48,8 @@ export function readBuildObservation(repository: string, sha: string, build: Jso
     name,
     state: BUILD_STATES[detail] ?? 'failure',
     detail,
-    deliveryKey: `build:${repository}:${id}:${detail}`,
-    order: [id, BUILD_STEPS[status] ?? 0],
+    deliveryKey: `build:${repository}:${id}:${changed}:${detail}`,
+    order: [id, changed],
     occurredAt: str(build, 'finishTime') ?? str(build, 'startTime') ?? str(build, 'queueTime'),
     url: isObject(build._links) && isObject(build._links.web) ? str(build._links.web, 'href') : null,
   };

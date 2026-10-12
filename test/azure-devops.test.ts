@@ -22,10 +22,13 @@ function pr(number: number, sha: string, extra: Record<string, unknown> = {}) {
   return { pullRequestId: number, status: 'active', lastMergeSourceCommit: { commitId: sha }, lastMergeCommit: { commitId: MERGE }, ...extra };
 }
 
+let changes = 0;
+
 function build(id: number, status: string, result: string | null, extra: Record<string, unknown> = {}) {
   return {
     id,
     status,
+    lastChangedDate: new Date(Date.UTC(2026, 0, 1, 0, 0, ++changes)).toISOString(),
     ...(result === null ? {} : { result }),
     definition: { name: 'ci' },
     sourceVersion: MERGE,
@@ -145,6 +148,23 @@ describe('AzureDevOpsPoller', () => {
       expect.objectContaining({ sha: OLD, check: 'build', from: null, to: 'running', detail: 'inProgress' }),
       expect.objectContaining({ sha: OLD, check: 'build', from: 'running', to: 'failure', detail: 'partiallySucceeded' }),
     ]);
+  });
+
+  it('reports a retried build, which keeps its build id', async () => {
+    const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD)] } } };
+    quiet(routes, [7, OLD]);
+    const at = (minute: number) => ({ lastChangedDate: `2026-01-01T00:0${minute}:00Z` });
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null, at(1))] } };
+    const { emitted, poll } = started(routes);
+    await poll();
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'completed', 'failed', at(2))] } };
+    await poll();
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null, at(3))] } };
+    await poll();
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'completed', 'succeeded', at(4))] } };
+    await poll();
+
+    expect(ciData(emitted).map((d) => d.to)).toEqual(['running', 'failure', 'running', 'success']);
   });
 
   it('uses triggerInfo pr.sourceSha when the pipeline reports it, and skips a build it cannot place', async () => {
