@@ -3,6 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ObservationOutcome, ScmObserver, ScmProvider } from '../scm/provider';
 import { readCiObservation, readPrClosedObservation, readPrHeadObservation } from './normalize';
 
+export { GitHubPoller, type GitHubPollerOptions } from './poller';
+
 export interface GitHubProviderOptions {
   webhookSecret: string;
   /** Bodies larger than this are refused before they are parsed. */

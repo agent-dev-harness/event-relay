@@ -13,8 +13,9 @@ has a section here.
 | `@agent-dev-harness/event-relay/kinds` | Kind names, their `data` types and the subject helpers. Imports only the contract. |
 | `@agent-dev-harness/event-relay` | `Relay`, to subscribe. Needed only by whoever runs the relay. |
 
-A consumer never needs `./scm` or `./github`. Which source or code host produced an event is not
-part of the contract.
+A consumer never needs `./scm`, `./github` or `./azure-devops`. Which source or code host produced
+an event is not part of the contract. A consumer in another process subscribes through the server,
+whose endpoints are specified in [`server.md`](server.md).
 
 ## The envelope
 
@@ -55,7 +56,7 @@ A CI check on a commit changed state. Subject: `commit`.
 | `data` field | Meaning |
 |---|---|
 | `repository`, `sha` | The commit. |
-| `check` | Which of the provider's mechanisms reported the check, e.g. GitHub's `check_run` or `status`. |
+| `check` | Which of the provider's mechanisms reported the check, e.g. GitHub's `check_run` or `status`, or Azure DevOps' `build` or `status`. |
 | `from` | The previous `CiState`, or `null` when the source hasn't seen this check on this commit before or has forgotten it. |
 | `to` | The new `CiState`. |
 | `detail` | The provider's own name for the new state, e.g. `timed_out`. For display; don't branch on it. |
@@ -128,8 +129,9 @@ the code host instead of waiting for events.
   after that window can arrive twice, so handle each id idempotently.
 - **Losses.** Every event the relay drops is reported as a `relay.gap`. A sink that rejects, or
   doesn't settle in time, loses that batch, which is reported as a gap in the next one.
-- **Not covered.** Events queued when the relay process stops are lost without a gap; persistence
-  and access control are not part of the relay yet.
+- **Not covered.** Events queued when the relay process stops are lost without a gap; a subscriber
+  learns of it only by subscribing again (see [Subscribing](#subscribing)). Persistence is not part
+  of the relay; the server's access control is in [`server.md`](server.md).
 
 **Events are hints, not commands.** Before acting on one, check the current state at its source.
 
@@ -138,6 +140,9 @@ the code host instead of waiting for events.
 `relay.subscribe(id, { filter, sink, minIntervalMs })` creates a subscription, or changes the one
 with that id. `filter.kinds` and `filter.subjects` each match exactly; leaving one out matches
 everything. A change applies to events emitted after it. `relay.cancel(id)` ends a subscription.
+
+A subscription carries only changes emitted after it is created or changed. When subscribing, or
+adding a subject, fetch the current state of what you follow.
 
 ## Compatibility
 
