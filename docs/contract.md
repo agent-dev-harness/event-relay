@@ -102,6 +102,51 @@ A pull request was merged, or closed without merging. Subject: `pull_request`.
 
 A PR reopened later sends `pr.head_changed` with `from: null`. Queued events coalesce per PR.
 
+### `pr.review_submitted`
+
+Someone reviewed a pull request. Subject: `pull_request`. The event says that a review arrived,
+not what it says: fetch the review from `url`.
+
+| `data` field | Meaning |
+|---|---|
+| `repository`, `number` | The pull request. |
+| `reviewId` | Identifies the review within the pull request. Treat it as opaque. |
+| `state` | `approved`, `changes_requested` or `commented`. |
+| `url` | A link to the review or the pull request, or `null`. |
+
+`untrusted.author` is the reviewer. A review is reported once, if it was submitted after the
+source started watching the repository (give or take a minute, for clock differences). Queued events coalesce per PR.
+
+### `pr.comment_added`
+
+Someone commented on a pull request, in its conversation or on its code. Subject:
+`pull_request`. Fetch the comment from `url`; the event doesn't carry its text.
+
+| `data` field | Meaning |
+|---|---|
+| `repository`, `number` | The pull request. |
+| `commentId` | Identifies the comment within the pull request. Treat it as opaque. |
+| `url` | A link to the comment or its thread, or `null`. |
+
+`untrusted.author` is who wrote it. A comment is reported once, if it was written after the
+source started watching the repository (give or take a minute); edits and deletions are not
+reported. Queued events
+coalesce per PR.
+
+### `pr.mergeability_changed`
+
+A pull request started or stopped conflicting with its base branch. Subject: `pull_request`.
+
+| `data` field | Meaning |
+|---|---|
+| `repository`, `number` | The pull request. |
+| `from` | The previous state, or `null` when the source hasn't seen this PR's mergeability before or has forgotten it. |
+| `to` | `mergeable` or `conflicting`. |
+| `url` | A link to the pull request, or `null`. |
+
+Nothing is sent while the host is still working out whether the PR merges. Queued events
+coalesce per PR.
+
 ### `relay.gap`
 
 The relay dropped events this subscriber would have received. Subject: the subject the events

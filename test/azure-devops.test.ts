@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, PR_CLOSED, PR_HEAD_CHANGED, type CiStatusChanged } from '../src/kinds/index';
+import { CI_STATUS_CHANGED, PR_CLOSED, PR_COMMENT_ADDED, PR_HEAD_CHANGED, PR_MERGEABILITY_CHANGED, PR_REVIEW_SUBMITTED, type CiStatusChanged } from '../src/kinds/index';
 import { AzureDevOpsPoller, type AzureDevOpsPollerOptions } from '../src/sources/azure-devops/index';
 import { RateLimited } from '../src/sources/scm/poll';
 import { ScmSource } from '../src/sources/scm/index';
@@ -48,7 +48,7 @@ function started(routes: Record<string, Route>, options: Partial<AzureDevOpsPoll
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     requests.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
-    const route = routes[url] ?? { status: 404, body: { message: 'not found' } };
+    const route = routes[url] ?? (/\/threads\?/.test(url) ? { body: { value: [] } } : undefined) ?? { status: 404, body: { message: 'not found' } };
     return new Response(JSON.stringify(route.body ?? null), {
       status: route.status ?? 200,
       headers: { 'content-type': 'application/json; charset=utf-8', ...route.headers },
@@ -229,6 +229,68 @@ describe('AzureDevOpsPoller', () => {
       expect(errors).toEqual([]);
       expect(fetch).toHaveBeenCalledTimes(1);
     }
+  });
+
+  describe('activity that should wake an agent', () => {
+    const reviewer = (id: string, vote: number) => ({ id, uniqueName: `${id}@example.com`, vote });
+    const threadsUrl = (number: number) => `${GIT}/pullRequests/${number}/threads?api-version=7.1`;
+
+    it('reports a reviewer\'s vote changing to approve or reject, but not votes already cast when polling began', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD, { reviewers: [reviewer('a', 10), reviewer('b', 0)] })] } } };
+      quiet(routes, [7, OLD], [8, NEW]);
+      const { emitted, poll } = started(routes);
+      await poll();
+
+      routes[pullsUrl] = { body: { value: [pr(7, OLD, { reviewers: [reviewer('a', 10), reviewer('b', -10)] }), pr(8, NEW, { reviewers: [reviewer('c', 5)] })] } };
+      await poll();
+      await poll();
+
+      expect(emitted.filter((e) => e.kind === PR_REVIEW_SUBMITTED).map((e) => [e.subject.key, (e.data as { state: string }).state, e.untrusted.author])).toEqual([
+        [`${REPOSITORY}#7`, 'changes_requested', 'b@example.com'],
+        [`${REPOSITORY}#8`, 'approved', 'c@example.com'],
+      ]);
+    });
+
+    it('reports comments people wrote since polling began, once each, and not system notes or deleted ones', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD)] } } };
+      quiet(routes, [7, OLD]);
+      const comment = (id: number, ms: number, extra: Record<string, unknown> = {}) =>
+        ({ id, author: { uniqueName: 'dev@example.com' }, commentType: 'text', publishedDate: new Date(ms).toISOString(), ...extra });
+      routes[threadsUrl(7)] = { body: { value: [{ id: 3, comments: [comment(1, -300_000)] }] } };
+      const { emitted, poll } = started(routes);
+      await poll();
+
+      routes[threadsUrl(7)] = {
+        body: {
+          value: [
+            { id: 3, comments: [comment(1, -300_000), comment(2, 500)] },
+            { id: 4, comments: [comment(1, 600, { commentType: 'system' }), comment(2, 600, { isDeleted: true })] },
+          ],
+        },
+      };
+      await poll();
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, (e.data as { commentId: string; url: string }).commentId, (e.data as { url: string }).url, e.untrusted.author])).toEqual([
+        [PR_COMMENT_ADDED, '3:2', `${ORG}/proj/_git/repo/pullrequest/7?discussionId=3`, 'dev@example.com'],
+      ]);
+    });
+
+    it('reports merge conflicts from mergeStatus, and nothing while it is being worked out', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD, { mergeStatus: 'queued' })] } } };
+      quiet(routes, [7, OLD]);
+      const { emitted, poll } = started(routes);
+      await poll();
+      routes[pullsUrl] = { body: { value: [pr(7, OLD, { mergeStatus: 'conflicts' })] } };
+      await poll();
+      routes[pullsUrl] = { body: { value: [pr(7, OLD, { mergeStatus: 'succeeded' })] } };
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, (e.data as { to: string }).to])).toEqual([
+        [PR_MERGEABILITY_CHANGED, 'conflicting'],
+        [PR_MERGEABILITY_CHANGED, 'mergeable'],
+      ]);
+    });
   });
 
   describe('with the Azure CLI', () => {

@@ -1,4 +1,4 @@
-import type { CiState } from '../../kinds';
+import type { CiState, Mergeability, ReviewState } from '../../kinds';
 
 /** One CI check's state on one commit, as a provider reports it. */
 export interface CiObservation {
@@ -55,6 +55,42 @@ export interface PrClosedObservation {
   url: string | null;
 }
 
+/** A review submitted on a pull request, reported once. */
+export interface ReviewObservation {
+  /** `<host>/<path>`. */
+  repository: string;
+  number: number;
+  /** Unique within the pull request, and the same each time this review is reported. */
+  reviewId: string;
+  state: ReviewState;
+  /** Written by whoever reviewed, so it is never trusted. */
+  author: string;
+  submittedAt: string | null;
+  url: string | null;
+}
+
+/** A comment added to a pull request, in its conversation or on its code, reported once. */
+export interface CommentObservation {
+  /** `<host>/<path>`. */
+  repository: string;
+  number: number;
+  /** Unique within the pull request, and the same each time this comment is reported. */
+  commentId: string;
+  /** Written by whoever commented, so it is never trusted. */
+  author: string;
+  createdAt: string | null;
+  url: string | null;
+}
+
+/** Whether a pull request merges cleanly, as of this poll. Not reported while the host is still working it out. */
+export interface MergeabilityObservation {
+  /** `<host>/<path>`. */
+  repository: string;
+  number: number;
+  state: Mergeability;
+  url: string | null;
+}
+
 /** What ScmSource did with an observation. */
 export type ObservationOutcome = 'accepted' | 'no change' | 'stale';
 
@@ -62,6 +98,9 @@ export interface ScmObserver {
   ci(observation: CiObservation): ObservationOutcome;
   prHead(observation: PrHeadObservation): ObservationOutcome;
   prClosed(observation: PrClosedObservation): ObservationOutcome;
+  review(observation: ReviewObservation): ObservationOutcome;
+  comment(observation: CommentObservation): ObservationOutcome;
+  mergeability(observation: MergeabilityObservation): ObservationOutcome;
 }
 
 /**
