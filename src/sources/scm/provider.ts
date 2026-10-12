@@ -4,6 +4,10 @@ import type { CiState } from '../../kinds';
 export interface CiObservation {
   /** `<host>/<path>`, e.g. "github.com/owner/repo". */
   repository: string;
+  /**
+   * The commit the check ran for. For a PR, the PR's head commit, not a merge
+   * commit CI built from it, so consumers can match it to `pr.head_changed`.
+   */
   sha: string;
   /** Which of the provider's mechanisms reported the check, e.g. GitHub's "check_run". */
   check: string;
@@ -28,7 +32,10 @@ export interface PrHeadObservation {
   /** `<host>/<path>`. */
   repository: string;
   number: number;
-  /** The head before this update, when the provider knows it. */
+  /**
+   * The head before this update; null only when the PR was opened or reopened,
+   * since consumers read a null `from` as that.
+   */
   before: string | null;
   sha: string;
   occurredAt: string | null;
