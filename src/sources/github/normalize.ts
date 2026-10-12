@@ -1,11 +1,6 @@
 import type { CiState } from '../../kinds';
 import type { CiObservation, PrClosedObservation, PrHeadObservation } from '../scm/provider';
-
-type Json = Record<string, unknown>;
-
-const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
-const str = (obj: Json, key: string): string | null => (typeof obj[key] === 'string' ? obj[key] : null);
-const num = (obj: Json, key: string): number | null => (typeof obj[key] === 'number' ? obj[key] : null);
+import { isObject, num, str, type Json } from '../scm/json';
 
 const CHECK_RUN_STEPS: Readonly<Record<string, number>> = { in_progress: 1, completed: 2 };
 
@@ -31,7 +26,7 @@ const CI_STATES: Readonly<Record<string, CiState>> = {
 const toCiState = (detail: string): CiState => CI_STATES[detail] ?? 'failure';
 
 /** `<host>/<owner>/<repo>`, so the same path on two hosts names two repositories. */
-function repositoryId(repository: Json): string | null {
+export function repositoryId(repository: Json): string | null {
   const fullName = str(repository, 'full_name');
   const htmlUrl = str(repository, 'html_url');
   if (fullName === null || htmlUrl === null || !URL.canParse(htmlUrl)) return null;

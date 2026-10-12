@@ -20,8 +20,11 @@ interface LayerRule {
 const LAYER_RULES: readonly LayerRule[] = [
   { from: ['src/contract.ts', 'src/core'], mustNotImport: ['src/kinds', 'src/sources'], message: 'the contract and core must not import a kind or a source' },
   { from: ['src/kinds'], mustNotImport: ['src/core', 'src/sources'], message: 'kinds may import only the contract' },
-  { from: ['src/sources/scm'], mustNotImport: ['src/sources/github'], message: 'ScmSource must not import a provider' },
-  { from: ['src/sources/github'], mustNotImport: ['src/core'], message: 'a provider must not import the core' },
+  { from: ['src/sources/scm'], mustNotImport: ['src/sources/github', 'src/sources/azure-devops'], message: 'ScmSource must not import a provider' },
+  { from: ['src/sources/github', 'src/sources/azure-devops'], mustNotImport: ['src/core'], message: 'a provider must not import the core' },
+  { from: ['src/sources/github'], mustNotImport: ['src/sources/azure-devops'], message: 'a provider must not import another provider' },
+  { from: ['src/sources/azure-devops'], mustNotImport: ['src/sources/github'], message: 'a provider must not import another provider' },
+  { from: ['src/contract.ts', 'src/core', 'src/kinds', 'src/sources'], mustNotImport: ['src/server'], message: 'only the server may import the server' },
 ];
 
 interface FoundImport {

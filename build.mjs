@@ -9,6 +9,9 @@ const entryPoints = [
     'src/kinds/index.ts',
     'src/sources/scm/index.ts',
     'src/sources/github/index.ts',
+    'src/sources/azure-devops/index.ts',
+    'src/server/index.ts',
+    'src/server/main.ts',
 ];
 
 rmSync('dist', { recursive: true, force: true });

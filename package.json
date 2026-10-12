@@ -25,7 +25,18 @@
         "./github": {
             "types": "./dist/sources/github/index.d.ts",
             "default": "./dist/sources/github/index.js"
+        },
+        "./azure-devops": {
+            "types": "./dist/sources/azure-devops/index.d.ts",
+            "default": "./dist/sources/azure-devops/index.js"
+        },
+        "./server": {
+            "types": "./dist/server/index.d.ts",
+            "default": "./dist/server/index.js"
         }
+    },
+    "bin": {
+        "event-relay-server": "./dist/server/main.js"
     },
     "files": [
         "dist"
