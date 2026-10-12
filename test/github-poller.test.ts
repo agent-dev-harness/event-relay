@@ -64,7 +64,16 @@ const INTERVAL = 1_000;
 function started(routes: Record<string, Route>, options: Partial<GitHubPollerOptions> = {}) {
   const github = fakeGitHub(routes);
   const errors: unknown[] = [];
-  const poller = new GitHubPoller({ token: 't', repositories: ['o/r'], fetch: github.fetch, intervalMs: INTERVAL, onError: (e) => errors.push(e), ...options });
+  const fatal: unknown[] = [];
+  const poller = new GitHubPoller({
+    token: 't',
+    repositories: ['o/r'],
+    fetch: github.fetch,
+    intervalMs: INTERVAL,
+    onError: (e) => errors.push(e),
+    onFatal: (e) => fatal.push(e),
+    ...options,
+  });
   const emitted: RelayEvent[] = [];
   const controller = new AbortController();
   void new ScmSource(poller).start({ emit: (e) => emitted.push(e), signal: controller.signal });
@@ -75,7 +84,7 @@ function started(routes: Record<string, Route>, options: Partial<GitHubPollerOpt
     // A pass is a chain of awaited fetches; let it finish before the test looks.
     for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
   };
-  return { emitted, github, controller, errors, poll };
+  return { emitted, github, controller, errors, fatal, poll };
 }
 
 const pullsUrl = `${API}/repos/o/r/pulls?state=open&per_page=100`;
@@ -222,8 +231,11 @@ describe('GitHubPoller', () => {
     controller.abort();
   });
 
-  it('keeps polling the other repositories when one fails', async () => {
-    const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+  it('keeps polling the other repositories when one fails for a moment', async () => {
+    const routes: Record<string, Route> = {
+      [pullsUrl]: { body: [pull(7, OLD)] },
+      [`${API}/repos/o/missing/pulls?state=open&per_page=100`]: { status: 502, body: {} },
+    };
     noChecks(routes, OLD, NEW);
     const { poll, emitted, errors } = started(routes, { repositories: ['o/missing', 'o/r'] });
     await poll();
@@ -232,7 +244,7 @@ describe('GitHubPoller', () => {
     await poll();
 
     expect(emitted.map((e) => e.kind)).toEqual([PR_HEAD_CHANGED]);
-    expect(errors.map(String)).toEqual([expect.stringContaining('HTTP 404'), expect.stringContaining('HTTP 404')]);
+    expect(errors.map(String)).toEqual([expect.stringContaining('HTTP 502'), expect.stringContaining('HTTP 502')]);
   });
 
   it('stops polling when the relay stops it', async () => {
@@ -244,6 +256,38 @@ describe('GitHubPoller', () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(github.requests).toHaveLength(1);
+  });
+
+  it('stops polling on a rejected token or a missing repository', async () => {
+    for (const status of [401, 403, 404]) {
+      const routes: Record<string, Route> = { [pullsUrl]: { status, body: {} } };
+      const { github, fatal, errors, poll } = started(routes);
+
+      await poll();
+      await poll();
+
+      expect(String(fatal[0])).toContain(`HTTP ${status}`);
+      expect(errors).toEqual([]);
+      expect(github.requests).toHaveLength(1);
+    }
+  });
+
+  it('stops polling after maxConsecutiveFailures transient failures in a row, counting from the last success', async () => {
+    const routes: Record<string, Route> = { [pullsUrl]: { status: 502, body: {} } };
+    const { fatal, errors, poll } = started(routes, { maxConsecutiveFailures: 3 });
+
+    await poll();
+    await poll();
+    routes[pullsUrl] = { body: [] };
+    await poll();
+    routes[pullsUrl] = { status: 503, body: {} };
+    await poll();
+    await poll();
+    expect(fatal).toEqual([]);
+    await poll();
+
+    expect(errors).toHaveLength(4);
+    expect(String(fatal[0])).toContain('3 polls in a row failed');
   });
 
   it('refuses an empty token and names that are not owner/repo', () => {

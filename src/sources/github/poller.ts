@@ -1,18 +1,28 @@
 import type { ScmObserver, ScmProvider } from '../scm/provider';
-import { HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs } from '../scm/poll';
+import { HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs, runPolling } from '../scm/poll';
 import { isObject, num, str, type Json } from '../scm/json';
 import { readCiObservation, repositoryId } from './normalize';
 
 export interface GitHubPollerOptions {
-  /** A personal access token or an installation token; sent as a Bearer token. */
+  /**
+   * A personal access token, sent as a Bearer token. It is expected not to
+   * expire: a rejected token stops polling (see `onFatal`).
+   */
   token: string;
   /** `owner/repo` names. */
   repositories: readonly string[];
   /** For GitHub Enterprise Server, e.g. "https://ghe.example.com/api/v3". */
   apiUrl?: string;
   intervalMs?: number;
-  /** Receives every failed poll; polling carries on. */
+  /** Receives each transient failure (network, 5xx, rate limiting); polling carries on. */
   onError?: (error: unknown) => void;
+  /**
+   * Receives the failure that stopped polling: a rejected token, a missing
+   * repository, anything unexpected, or `maxConsecutiveFailures` transient ones in
+   * a row. Without it the failure is thrown as an uncaught exception.
+   */
+  onFatal?: (error: unknown) => void;
+  maxConsecutiveFailures?: number;
   fetch?: typeof fetch;
 }
 
@@ -56,7 +66,7 @@ export class GitHubPoller implements ScmProvider {
 
   start(observer: ScmObserver, signal: AbortSignal): void {
     this.observer = observer;
-    void pollEvery(this.intervalMs, signal, () => this.poll(), this.options.onError ?? (() => {}));
+    runPolling(pollEvery(this.intervalMs, signal, () => this.poll(), this.options.onError ?? (() => {}), this.options.maxConsecutiveFailures), this.options.onFatal);
   }
 
   /** One pass over every repository. A repository that fails doesn't stop the others; rate limiting does. */

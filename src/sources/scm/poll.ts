@@ -76,20 +76,59 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** Something polling can't recover from by waiting, such as a rejected token. */
+export class Unexpected extends Error {}
+
+/** A failure the next poll may not have: the host or the network is having a bad moment. */
+export function isTransient(error: unknown): boolean {
+  if (error instanceof AggregateError) return error.errors.every(isTransient);
+  if (error instanceof RateLimited) return true;
+  if (error instanceof HttpError) return error.status >= 500 || error.status === 408 || error.status === 429;
+  // What fetch throws when it can't reach the host at all.
+  return error instanceof TypeError && error.message === 'fetch failed';
+}
+
+export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 10;
+
 /**
- * Calls `poll` now and then every `intervalMs` until `signal` fires. A failed
- * poll goes to `onError` and the loop carries on; after `RateLimited` it waits
- * at least as long as the host asked.
+ * Calls `poll` now and then every `intervalMs` until `signal` fires. A transient
+ * failure goes to `onError` and the loop carries on, after `RateLimited` waiting
+ * at least as long as the host asked. Anything else, or `maxConsecutiveFailures`
+ * transient failures in a row, rejects: a source that can't see its host must
+ * not look like a host where nothing happens.
  */
-export async function pollEvery(intervalMs: number, signal: AbortSignal, poll: () => Promise<void>, onError: (error: unknown) => void): Promise<void> {
+export async function pollEvery(
+  intervalMs: number,
+  signal: AbortSignal,
+  poll: () => Promise<void>,
+  onError: (error: unknown) => void,
+  maxConsecutiveFailures: number = DEFAULT_MAX_CONSECUTIVE_FAILURES,
+): Promise<void> {
+  let failures = 0;
   while (!signal.aborted) {
     let wait = intervalMs;
     try {
       await poll();
+      failures = 0;
     } catch (error) {
+      if (!isTransient(error)) throw error;
+      if (++failures >= maxConsecutiveFailures) {
+        throw new Unexpected(`${failures} polls in a row failed; the last with: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
       if (error instanceof RateLimited) wait = Math.max(wait, error.retryAfterMs);
       onError(error);
     }
     await sleep(wait, signal);
   }
+}
+
+/**
+ * Runs a poller's loop. A failure it can't recover from goes to `onFatal`; with
+ * none, it is rethrown as an uncaught exception, which ends the process.
+ */
+export function runPolling(loop: Promise<void>, onFatal: ((error: unknown) => void) | undefined): void {
+  loop.catch((error: unknown) => {
+    if (onFatal) onFatal(error);
+    else queueMicrotask(() => { throw error; });
+  });
 }

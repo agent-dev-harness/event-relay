@@ -55,12 +55,14 @@ function started(routes: Record<string, Route>, options: Partial<AzureDevOpsPoll
     });
   });
   const errors: unknown[] = [];
+  const fatal: unknown[] = [];
   const poller = new AzureDevOpsPoller({
     organizationUrl: ORG,
     repositories: ['proj/repo'],
     token: 'pat',
     intervalMs: INTERVAL,
     onError: (e) => errors.push(e),
+    onFatal: (e) => fatal.push(e),
     fetch: fetch as unknown as typeof globalThis.fetch,
     ...options,
   });
@@ -73,7 +75,7 @@ function started(routes: Record<string, Route>, options: Partial<AzureDevOpsPoll
     first = false;
     for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
   };
-  return { emitted, requests, errors, controller, poll };
+  return { emitted, requests, errors, fatal, controller, poll };
 }
 
 function quiet(routes: Record<string, Route>, ...prs: [number, string][]): void {
@@ -212,15 +214,73 @@ describe('AzureDevOpsPoller', () => {
     controller.abort();
   });
 
-  it('treats a sign-in page instead of JSON as a failed request', async () => {
-    const routes: Record<string, Route> = {};
-    const { errors, poll } = started(routes, {
-      fetch: (async () => new Response('<html>sign in</html>', { status: 203, headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch,
+  it('stops polling when a PAT is answered with a sign-in page or a 401', async () => {
+    for (const response of [
+      () => new Response('<html>sign in</html>', { status: 203, headers: { 'content-type': 'text/html' } }),
+      () => new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } }),
+    ]) {
+      const fetch = vi.fn(async () => response());
+      const { fatal, errors, poll } = started({}, { fetch: fetch as unknown as typeof globalThis.fetch });
+
+      await poll();
+      await poll();
+
+      expect(String(fatal[0])).toContain('rejected the credential');
+      expect(errors).toEqual([]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  describe('with the Azure CLI', () => {
+    const azToken = (accessToken: string, expiresInS: number) =>
+      JSON.stringify({ accessToken, expires_on: Math.floor(Date.now() / 1000) + expiresInS, tokenType: 'Bearer' });
+
+    it('sends the az token as a Bearer token and asks az again shortly before it expires', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [] } } };
+      const tokens = ['one', 'two'];
+      const runAzureCli = vi.fn(async (args: readonly string[]) => {
+        expect(args).toEqual(['account', 'get-access-token', '--resource', '499b84ac-1321-427f-aa17-267ca6975798', '--output', 'json']);
+        return azToken(tokens.shift()!, 3_600);
+      });
+      const { requests, poll } = started(routes, { token: undefined, azureCli: true, runAzureCli });
+
+      await poll();
+      await poll();
+      expect(runAzureCli).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(56 * 60_000);
+      for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
+
+      expect(runAzureCli).toHaveBeenCalledTimes(2);
+      expect(requests[0]!.headers.authorization).toBe('Bearer one');
+      expect(requests.at(-1)!.headers.authorization).toBe('Bearer two');
     });
 
-    await poll();
+    it('asks az for a new token once when the host rejects one, and stops if that is rejected too', async () => {
+      const runAzureCli = vi.fn(async () => azToken('t', 3_600));
+      let answers = [401, 200];
+      const fetch = vi.fn(async () => {
+        const status = answers.shift() ?? 401;
+        return new Response(JSON.stringify({ value: [] }), { status, headers: { 'content-type': 'application/json' } });
+      });
+      const { fatal, poll } = started({}, { token: undefined, azureCli: true, runAzureCli, fetch: fetch as unknown as typeof globalThis.fetch });
 
-    expect(String(errors[0])).toContain('HTTP 203');
+      await poll();
+      expect(fatal).toEqual([]);
+      expect(runAzureCli).toHaveBeenCalledTimes(2);
+
+      answers = [401, 401];
+      await poll();
+      expect(String(fatal[0])).toContain('rejected the credential');
+    });
+
+    it('stops polling when az fails, saying to sign in', async () => {
+      const runAzureCli = vi.fn(async () => { throw new Error('Please run az login'); });
+      const { fatal, poll } = started({}, { token: undefined, azureCli: true, runAzureCli });
+
+      await poll();
+
+      expect(String(fatal[0])).toContain('az login');
+    });
   });
 
   it('names a visualstudio.com organization the same as its dev.azure.com URL', async () => {
@@ -240,6 +300,8 @@ describe('AzureDevOpsPoller', () => {
   it('refuses an empty token, a bad URL and names that are not project/repository', () => {
     const base = { organizationUrl: ORG, repositories: [], token: 'pat' };
     expect(() => new AzureDevOpsPoller({ ...base, token: '' })).toThrow('token');
+    expect(() => new AzureDevOpsPoller({ ...base, token: undefined })).toThrow('exactly one');
+    expect(() => new AzureDevOpsPoller({ ...base, azureCli: true })).toThrow('exactly one');
     expect(() => new AzureDevOpsPoller({ ...base, organizationUrl: 'not a url' })).toThrow('URL');
     expect(() => new AzureDevOpsPoller({ ...base, repositories: ['repo'] })).toThrow('project/repository');
   });
