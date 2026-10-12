@@ -24,14 +24,20 @@ GITHUB_TOKEN=… AZURE_DEVOPS_TOKEN=… event-relay-server relay.config.json
 |---|---|
 | `host`, `port` | Where to listen. Default `127.0.0.1:8787`. |
 | `allowedHosts` | `Host` header names the server answers. Default: `localhost`, `127.0.0.1`, `[::1]` and `host`. |
-| `github` | Poll these `owner/repo` repositories. `apiUrl` for GitHub Enterprise Server. Needs `GITHUB_TOKEN`. |
-| `azureDevOps` | Poll these `project/repository` repositories in `organizationUrl`. Needs `AZURE_DEVOPS_TOKEN` (a PAT with Code and Build read). |
+| `github` | Poll these `owner/repo` repositories. `apiUrl` for GitHub Enterprise Server. Needs `GITHUB_TOKEN`, a personal access token that doesn't expire. |
+| `azureDevOps` | Poll these `project/repository` repositories in `organizationUrl`. `auth` is `"pat"` (default; needs `AZURE_DEVOPS_TOKEN`, a PAT with Code and Build read) or `"az"`, which takes tokens from the Azure CLI's signed-in account (`az login`) and gets a new one before each expires. |
 | `limits` | Any of `RelayLimits`. |
 
 Configure at least one of `github` and `azureDevOps`. Tokens come only from the environment, so the
 file can be committed. Each source polls every `intervalMs` (default 30 s): events arrive up to one
 interval after the change, and nothing is lost while the server is down, because the next poll
 sees the current state.
+
+**The server exits (status 1) when a source can't poll**, so it never looks like a host where
+nothing happens. That is: a rejected token, a repository that isn't found, `az` failing to give a
+token, a response it doesn't understand, or 10 failed polls in a row. A failure that may pass on
+its own (network, a 5xx, rate limiting) is logged and retried. Open streams close when the server
+exits, so subscribers see it too.
 
 ## Access
 

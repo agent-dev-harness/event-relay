@@ -7,7 +7,8 @@ export interface ServerConfig {
   token: string | undefined;
   allowedHosts: string[] | undefined;
   github: { repositories: string[]; apiUrl: string | undefined; intervalMs: number | undefined; token: string } | undefined;
-  azureDevOps: { organizationUrl: string; repositories: string[]; intervalMs: number | undefined; token: string } | undefined;
+  /** Exactly one of `token` (a PAT) and `azureCli` is set. */
+  azureDevOps: { organizationUrl: string; repositories: string[]; intervalMs: number | undefined; token?: string; azureCli?: true } | undefined;
   limits: Partial<RelayLimits>;
 }
 
@@ -88,11 +89,13 @@ export function parseConfig(json: unknown, env: Readonly<Record<string, string |
   const adoJson = optionalObject(json, 'azureDevOps');
   const organizationUrl = adoJson && optionalString(adoJson, 'organizationUrl', 'azureDevOps.');
   if (adoJson && organizationUrl === undefined) throw new Error('azureDevOps.organizationUrl must be set');
+  const adoAuth = adoJson && (optionalString(adoJson, 'auth', 'azureDevOps.') ?? 'pat');
+  if (adoAuth !== undefined && adoAuth !== 'pat' && adoAuth !== 'az') throw new Error('azureDevOps.auth must be "pat" or "az"');
   const azureDevOps = adoJson && organizationUrl !== undefined ? {
     organizationUrl,
     repositories: stringList(adoJson, 'repositories', 'azureDevOps.'),
     intervalMs: optionalNumber(adoJson, 'intervalMs', 'azureDevOps.'),
-    token: secret(env, 'AZURE_DEVOPS_TOKEN', 'azureDevOps'),
+    ...(adoAuth === 'az' ? { azureCli: true as const } : { token: secret(env, 'AZURE_DEVOPS_TOKEN', 'azureDevOps with auth "pat"') }),
   } : undefined;
   if (!github && !azureDevOps) throw new Error('configure at least one of github and azureDevOps');
 

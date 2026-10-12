@@ -1,6 +1,7 @@
 import type { ScmObserver, ScmProvider } from '../scm/provider';
 import { isObject, num, str, type Json } from '../scm/json';
-import { HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs } from '../scm/poll';
+import { HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs, runPolling, Unexpected } from '../scm/poll';
+import { azureCli, personalAccessToken, type Credential, type RunAzureCli } from './auth';
 import { buildHeadSha, readBuildObservation, readStatusObservation, sourceHeadSha } from './normalize';
 
 export interface AzureDevOpsPollerOptions {
@@ -8,11 +9,22 @@ export interface AzureDevOpsPollerOptions {
   organizationUrl: string;
   /** `project/repository` names. */
   repositories: readonly string[];
-  /** A personal access token with Code (read) and Build (read). */
-  token: string;
+  /** A personal access token with Code (read) and Build (read). Give this or `azureCli`. */
+  token?: string;
+  /** Use the Azure CLI's signed-in account (`az login`) instead of a token. */
+  azureCli?: boolean;
+  /** How to run `az`; defaults to the `az` on PATH. */
+  runAzureCli?: RunAzureCli;
   intervalMs?: number;
-  /** Receives every failed poll; polling carries on. */
+  /** Receives each transient failure (network, 5xx, throttling); polling carries on. */
   onError?: (error: unknown) => void;
+  /**
+   * Receives the failure that stopped polling: a rejected credential, a missing
+   * repository, anything unexpected, or `maxConsecutiveFailures` transient ones in
+   * a row. Without it the failure is thrown as an uncaught exception.
+   */
+  onFatal?: (error: unknown) => void;
+  maxConsecutiveFailures?: number;
   fetch?: typeof fetch;
 }
 
@@ -47,11 +59,12 @@ export class AzureDevOpsPoller implements ScmProvider {
   private readonly repositories: Repository[];
   private readonly intervalMs: number;
   private readonly fetch: typeof fetch;
-  private readonly authorization: string;
+  private readonly credential: Credential;
   private readonly openPullRequests = new Map<string, OpenPullRequests>();
   private observer: ScmObserver | undefined;
 
   constructor(private readonly options: AzureDevOpsPollerOptions) {
+    if ((options.token === undefined) === !options.azureCli) throw new Error('give exactly one of token and azureCli');
     if (options.token === '') throw new Error('token must not be empty');
     if (!URL.canParse(options.organizationUrl)) throw new Error(`organizationUrl "${options.organizationUrl}" is not a URL`);
     this.organizationUrl = options.organizationUrl.replace(/\/+$/, '');
@@ -71,12 +84,12 @@ export class AzureDevOpsPoller implements ScmProvider {
     });
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.fetch = options.fetch ?? globalThis.fetch;
-    this.authorization = `Basic ${Buffer.from(`:${options.token}`).toString('base64')}`;
+    this.credential = options.token !== undefined ? personalAccessToken(options.token) : azureCli(options.runAzureCli);
   }
 
   start(observer: ScmObserver, signal: AbortSignal): void {
     this.observer = observer;
-    void pollEvery(this.intervalMs, signal, () => this.poll(), this.options.onError ?? (() => {}));
+    runPolling(pollEvery(this.intervalMs, signal, () => this.poll(), this.options.onError ?? (() => {}), this.options.maxConsecutiveFailures), this.options.onFatal);
   }
 
   /** One pass over every repository. A repository that fails doesn't stop the others; rate limiting does. */
@@ -160,17 +173,21 @@ export class AzureDevOpsPoller implements ScmProvider {
     return isObject(body) && Array.isArray(body.value) ? body.value.filter(isObject) : [];
   }
 
-  private async getJson(url: string): Promise<unknown> {
+  private async getJson(url: string, retried = false): Promise<unknown> {
     const withVersion = `${url}${url.includes('?') ? '&' : '?'}api-version=${API_VERSION}`;
-    const response = await this.fetch(withVersion, { headers: { accept: 'application/json', authorization: this.authorization } });
+    const authorization = await this.credential.header();
+    const response = await this.fetch(withVersion, { headers: { accept: 'application/json', authorization } });
     if (response.status === 429 || response.status === 503) {
       const wait = retryAfterMs(response.headers);
       if (wait !== null) throw new RateLimited(wait);
     }
-    // Azure DevOps answers a bad or expired token with a sign-in page, not a 401.
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) {
-      throw new HttpError(response.status, withVersion);
+    // Azure DevOps can answer a bad or expired credential with a sign-in page (203) instead of a 401.
+    const signIn = response.ok && !(response.headers.get('content-type') ?? '').includes('application/json');
+    if (response.status === 401 || signIn) {
+      if (!retried && this.credential.rejected()) return this.getJson(url, true);
+      throw new Unexpected(`Azure DevOps rejected the credential (HTTP ${response.status}) for ${withVersion}`);
     }
+    if (!response.ok) throw new HttpError(response.status, withVersion);
     return response.json();
   }
 }

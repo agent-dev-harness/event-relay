@@ -17,13 +17,18 @@ if (path === undefined) {
 
 const config = parseConfig(JSON.parse(readFileSync(path, 'utf8')), process.env);
 const logError = (source: string) => (error: unknown): void => console.error(`[${source}]`, error instanceof Error ? error.message : error);
+// A source that stopped polling can't see its host; staying up would look like a host where nothing happens.
+const exitOnFatal = (source: string) => (error: unknown): void => {
+  console.error(`[${source}] stopped polling:`, error instanceof Error ? error.message : error);
+  process.exit(1);
+};
 
 const relay = new Relay(config.limits);
 if (config.github) {
-  await relay.addSource(new ScmSource(new GitHubPoller({ ...config.github, onError: logError('github') })));
+  await relay.addSource(new ScmSource(new GitHubPoller({ ...config.github, onError: logError('github'), onFatal: exitOnFatal('github') })));
 }
 if (config.azureDevOps) {
-  await relay.addSource(new ScmSource(new AzureDevOpsPoller({ ...config.azureDevOps, onError: logError('azure-devops') })));
+  await relay.addSource(new ScmSource(new AzureDevOpsPoller({ ...config.azureDevOps, onError: logError('azure-devops'), onFatal: exitOnFatal('azure-devops') })));
 }
 
 const relayServer = new RelayServer(relay, {

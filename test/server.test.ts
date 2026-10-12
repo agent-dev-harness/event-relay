@@ -186,6 +186,12 @@ describe('parseConfig', () => {
     });
   });
 
+  it('uses the Azure CLI instead of AZURE_DEVOPS_TOKEN with auth "az"', () => {
+    const config = parseConfig({ azureDevOps: { organizationUrl: 'https://dev.azure.com/org', repositories: ['p/r'], auth: 'az' } }, {});
+    expect(config.azureDevOps).toEqual({ organizationUrl: 'https://dev.azure.com/org', repositories: ['p/r'], intervalMs: undefined, azureCli: true });
+    expect(() => parseConfig({ azureDevOps: { organizationUrl: 'https://dev.azure.com/org', repositories: ['p/r'], auth: 'oauth' } }, env)).toThrow('auth');
+  });
+
   it('refuses a configured source without its token', () => {
     expect(() => parseConfig({ github: { repositories: ['o/r'] } }, {})).toThrow('GITHUB_TOKEN');
   });
