@@ -1,5 +1,6 @@
 import type { ScmObserver, ScmProvider } from '../scm/provider';
-import { HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs, runPolling } from '../scm/poll';
+import { ActivityWindow, HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs, runPolling } from '../scm/poll';
+import type { ReviewState } from '../../kinds';
 import { isObject, num, str, type Json } from '../scm/json';
 import { readCiObservation, repositoryId } from './normalize';
 
@@ -36,9 +37,9 @@ interface Cached {
 }
 
 /**
- * Polls each repository's open pull requests, and the check runs and commit
- * statuses on their heads, and turns what changed into observations for an
- * ScmSource. Polling instead of webhooks means nothing is lost while the relay
+ * Polls each repository's open pull requests: the check runs and commit
+ * statuses on their heads, their reviews, comments and mergeability. It turns
+ * what changed into observations for an ScmSource. Polling instead of webhooks means nothing is lost while the relay
  * is down: the next poll sees the current state.
  *
  * Requests are conditional (ETag), and GitHub doesn't count a 304 against the
@@ -50,6 +51,7 @@ export class GitHubPoller implements ScmProvider {
   private readonly intervalMs: number;
   private readonly fetch: typeof fetch;
   private readonly openPullRequests = new Map<string, OpenPullRequests>();
+  private readonly activity = new Map<string, ActivityWindow>();
   private cache = new Map<string, Cached>();
   private usedThisPoll = new Set<string>();
   private observer: ScmObserver | undefined;
@@ -89,6 +91,12 @@ export class GitHubPoller implements ScmProvider {
   }
 
   private async pollRepository(observer: ScmObserver, name: string): Promise<void> {
+    let window = this.activity.get(name);
+    if (!window) {
+      window = new ActivityWindow();
+      this.activity.set(name, window);
+    }
+    const since = window.begin();
     const pulls = (await this.getPages(`${this.apiUrl}/repos/${name}/pulls?state=open&per_page=100`)).filter(isObject);
     const open = new Map<number, Json>();
     for (const pr of pulls) {
@@ -110,7 +118,12 @@ export class GitHubPoller implements ScmProvider {
       observer.prHead({ repository, number, before, sha, occurredAt: str(pr, 'updated_at'), url: str(pr, 'html_url') });
     }
 
-    for (const pr of open.values()) await this.pollChecks(observer, name, pr);
+    for (const pr of open.values()) {
+      await this.pollChecks(observer, name, pr);
+      await this.pollReviews(observer, name, pr, since);
+      await this.pollMergeability(observer, name, pr);
+    }
+    await this.pollComments(observer, name, open, since);
 
     for (const number of gone) {
       const pr = await this.getJson(`${this.apiUrl}/repos/${name}/pulls/${number}`);
@@ -122,6 +135,51 @@ export class GitHubPoller implements ScmProvider {
         observer.prClosed({ repository, number, merged: str(pr, 'merged_at') !== null, sha, closedAt, url: str(pr, 'html_url') });
       }
       tracker.forget(number);
+    }
+    window.succeeded();
+  }
+
+  private async pollReviews(observer: ScmObserver, name: string, pr: Json, since: number): Promise<void> {
+    const number = num(pr, 'number')!;
+    const repository = baseRepositoryId(pr);
+    if (repository === null) return;
+    for (const review of (await this.getPages(`${this.apiUrl}/repos/${name}/pulls/${number}/reviews?per_page=100`)).filter(isObject)) {
+      const id = num(review, 'id');
+      const state = REVIEW_STATES[str(review, 'state') ?? ''];
+      const submittedAt = str(review, 'submitted_at');
+      if (id === null || state === undefined || submittedAt === null || Date.parse(submittedAt) < since) continue;
+      observer.review({ repository, number, reviewId: String(id), state, author: login(review), submittedAt, url: str(review, 'html_url') });
+    }
+  }
+
+  private async pollMergeability(observer: ScmObserver, name: string, pr: Json): Promise<void> {
+    const number = num(pr, 'number')!;
+    const repository = baseRepositoryId(pr);
+    // The PR list leaves `mergeable` out, and GitHub works it out lazily: null means not known yet.
+    const detail = await this.getJson(`${this.apiUrl}/repos/${name}/pulls/${number}`);
+    if (repository === null || !isObject(detail) || typeof detail.mergeable !== 'boolean') return;
+    observer.mergeability({ repository, number, state: detail.mergeable ? 'mergeable' : 'conflicting', url: str(pr, 'html_url') });
+  }
+
+  /** Conversation and code comments of the whole repository, made since `since`, on PRs that are open. */
+  private async pollComments(observer: ScmObserver, name: string, open: ReadonlyMap<number, Json>, since: number): Promise<void> {
+    const after = new Date(since).toISOString();
+    const sources = [
+      { kind: 'review-comment', url: `${this.apiUrl}/repos/${name}/pulls/comments?since=${after}&per_page=100`, prUrl: 'pull_request_url' },
+      { kind: 'issue-comment', url: `${this.apiUrl}/repos/${name}/issues/comments?since=${after}&per_page=100`, prUrl: 'issue_url' },
+    ];
+    for (const { kind, url, prUrl } of sources) {
+      for (const comment of (await this.getPages(url)).filter(isObject)) {
+        const id = num(comment, 'id');
+        const createdAt = str(comment, 'created_at');
+        const number = Number(/\/(\d+)$/.exec(str(comment, prUrl) ?? '')?.[1]);
+        const pr = open.get(number);
+        // `since` matches edits too; only comments made in the window are new.
+        if (id === null || createdAt === null || Date.parse(createdAt) < since || pr === undefined) continue;
+        const repository = baseRepositoryId(pr);
+        if (repository === null) continue;
+        observer.comment({ repository, number, commentId: `${kind}:${id}`, author: login(comment), createdAt, url: str(comment, 'html_url') });
+      }
     }
   }
 
@@ -190,6 +248,12 @@ export class GitHubPoller implements ScmProvider {
     if (etag !== null) this.cache.set(url, { etag, body });
     return { body, link: response.headers.get('link') };
   }
+}
+
+const REVIEW_STATES: Readonly<Record<string, ReviewState>> = { APPROVED: 'approved', CHANGES_REQUESTED: 'changes_requested', COMMENTED: 'commented' };
+
+function login(item: Json): string {
+  return (isObject(item.user) ? str(item.user, 'login') : null) ?? '';
 }
 
 function headSha(pr: Json): string | null {

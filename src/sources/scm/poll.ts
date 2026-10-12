@@ -62,6 +62,31 @@ export class OpenPullRequests {
   }
 }
 
+/** How far the host's clock may be behind ours without a review or comment being missed. */
+const CLOCK_SKEW_MS = 60_000;
+
+/**
+ * Which reviews and comments count as new: those made since the start of the
+ * last poll that succeeded, so a failed poll's are picked up by the next one.
+ * On the first poll that is its own start: what was there before polling began
+ * is not news. An item can fall in two polls' windows; ScmSource reports it once.
+ */
+export class ActivityWindow {
+  private lastSuccess: number | null = null;
+  private current = 0;
+
+  /** Call as a poll starts; returns the time (ms) from which items are new. */
+  begin(now: number = Date.now()): number {
+    this.current = now;
+    return (this.lastSuccess ?? now) - CLOCK_SKEW_MS;
+  }
+
+  /** Call when the poll begun last finished. */
+  succeeded(): void {
+    this.lastSuccess = this.current;
+  }
+}
+
 /** Resolves after `ms`, or as soon as `signal` fires. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {

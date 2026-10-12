@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RelayEvent } from '../src/contract';
-import { CI_STATUS_CHANGED, PR_CLOSED, PR_HEAD_CHANGED } from '../src/kinds/index';
+import { CI_STATUS_CHANGED, PR_CLOSED, PR_COMMENT_ADDED, PR_HEAD_CHANGED, PR_MERGEABILITY_CHANGED, PR_REVIEW_SUBMITTED } from '../src/kinds/index';
 import { GitHubPoller, type GitHubPollerOptions } from '../src/sources/github/index';
 import { RateLimited } from '../src/sources/scm/poll';
 import { ScmSource } from '../src/sources/scm/index';
@@ -35,6 +35,14 @@ interface Route {
   headers?: Record<string, string>;
 }
 
+/** Answers for what most tests don't look at: no reviews or comments, and mergeability not known yet. */
+function quietDefault(url: string): Route | undefined {
+  const path = new URL(url).pathname;
+  if (/\/pulls\/\d+\/reviews$/.test(path) || /\/(pulls|issues)\/comments$/.test(path)) return { body: [] };
+  if (/\/pulls\/\d+$/.test(path)) return { body: { mergeable: null } };
+  return undefined;
+}
+
 /** A fake GitHub: `routes` maps a URL to what it answers. Each answer carries an ETag derived from its body. */
 function fakeGitHub(routes: Record<string, Route>) {
   const requests: { url: string; headers: Record<string, string> }[] = [];
@@ -42,7 +50,7 @@ function fakeGitHub(routes: Record<string, Route>) {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
     requests.push({ url, headers });
-    const route = routes[url] ?? { status: 404, body: { message: 'Not Found' } };
+    const route = routes[url] ?? routes[url.split('?')[0]!] ?? quietDefault(url) ?? { status: 404, body: { message: 'Not Found' } };
     const body = JSON.stringify(route.body ?? null);
     const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
     if (headers['if-none-match'] === etag) return new Response(null, { status: 304, headers: { etag } });
@@ -79,7 +87,7 @@ function started(routes: Record<string, Route>, options: Partial<GitHubPollerOpt
   void new ScmSource(poller).start({ emit: (e) => emitted.push(e), signal: controller.signal });
   let first = true;
   const poll = async (): Promise<void> => {
-    await vi.advanceTimersByTimeAsync(first ? 0 : INTERVAL);
+    await vi.advanceTimersByTimeAsync(first ? 0 : (options.intervalMs ?? INTERVAL));
     first = false;
     // A pass is a chain of awaited fetches; let it finish before the test looks.
     for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(0);
@@ -249,13 +257,14 @@ describe('GitHubPoller', () => {
 
   it('stops polling when the relay stops it', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: [] } };
-    const { github, controller } = started(routes);
+    const { github, controller, poll } = started(routes);
 
-    await vi.advanceTimersByTimeAsync(0);
+    await poll();
+    const firstPoll = github.requests.length;
     controller.abort();
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(github.requests).toHaveLength(1);
+    expect(github.requests).toHaveLength(firstPoll);
   });
 
   it('stops polling on a rejected token or a missing repository', async () => {
@@ -288,6 +297,99 @@ describe('GitHubPoller', () => {
 
     expect(errors).toHaveLength(4);
     expect(String(fatal[0])).toContain('3 polls in a row failed');
+  });
+
+  describe('activity that should wake an agent', () => {
+    const at = (ms: number) => new Date(ms).toISOString();
+    const user = (login: string) => ({ login });
+
+    it('reports reviews submitted since polling began, once each, and not pending or dismissed ones', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+      noChecks(routes, OLD);
+      const reviewsUrl = `${API}/repos/o/r/pulls/7/reviews?per_page=100`;
+      routes[reviewsUrl] = { body: [{ id: 1, state: 'APPROVED', user: user('old'), submitted_at: at(-120_000), html_url: 'u1' }] };
+      const { emitted, poll } = started(routes);
+      await poll();
+
+      routes[reviewsUrl] = {
+        body: [
+          { id: 1, state: 'APPROVED', user: user('old'), submitted_at: at(-120_000), html_url: 'u1' },
+          { id: 2, state: 'CHANGES_REQUESTED', user: user('rev'), submitted_at: at(500), html_url: 'u2' },
+          { id: 3, state: 'PENDING', user: user('rev'), submitted_at: null },
+          { id: 4, state: 'DISMISSED', user: user('rev'), submitted_at: at(600) },
+        ],
+      };
+      await poll();
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, e.subject.key, e.data, e.untrusted])).toEqual([
+        [PR_REVIEW_SUBMITTED, 'github.com/o/r#7', { repository: 'github.com/o/r', number: 7, reviewId: '2', state: 'changes_requested', url: 'u2' }, { author: 'rev' }],
+      ]);
+    });
+
+    it('reports code and conversation comments on open PRs, once each, and not edits of older ones', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+      noChecks(routes, OLD);
+      const { emitted, github, poll } = started(routes);
+      await poll();
+
+      routes[`${API}/repos/o/r/pulls/comments`] = {
+        body: [{ id: 10, pull_request_url: `${API}/repos/o/r/pulls/7`, user: user('a'), created_at: at(500), html_url: 'c10' }],
+      };
+      routes[`${API}/repos/o/r/issues/comments`] = {
+        body: [
+          { id: 20, issue_url: `${API}/repos/o/r/issues/7`, user: user('b'), created_at: at(600), html_url: 'c20' },
+          { id: 21, issue_url: `${API}/repos/o/r/issues/99`, user: user('b'), created_at: at(600), html_url: 'on an issue, not an open PR' },
+          { id: 22, issue_url: `${API}/repos/o/r/issues/7`, user: user('b'), created_at: at(-300_000), html_url: 'edited, made long ago' },
+        ],
+      };
+      await poll();
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, (e.data as { commentId: string }).commentId, e.untrusted.author])).toEqual([
+        [PR_COMMENT_ADDED, 'review-comment:10', 'a'],
+        [PR_COMMENT_ADDED, 'issue-comment:20', 'b'],
+      ]);
+      expect(github.requests.at(-1)!.url).toContain(`since=${at(1_000 - 60_000)}`);
+    });
+
+    it('picks up a comment made while a poll failed', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+      noChecks(routes, OLD);
+      // Polls at 0, 300 s (fails) and 600 s; the comment at 450 s is only in a window that starts at the last success.
+      const { emitted, errors, poll } = started(routes, { intervalMs: 300_000 });
+      await poll();
+
+      routes[pullsUrl] = { status: 502, body: {} };
+      await poll();
+      routes[pullsUrl] = { body: [pull(7, OLD)] };
+      routes[`${API}/repos/o/r/issues/comments`] = {
+        body: [{ id: 20, issue_url: `${API}/repos/o/r/issues/7`, user: user('b'), created_at: at(450_000), html_url: 'c20' }],
+      };
+      await poll();
+
+      expect(errors).toHaveLength(1);
+      expect(emitted.map((e) => e.kind)).toEqual([PR_COMMENT_ADDED]);
+    });
+
+    it('reports when a PR starts or stops conflicting, once GitHub knows', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+      noChecks(routes, OLD);
+      const detailUrl = `${API}/repos/o/r/pulls/7`;
+      routes[detailUrl] = { body: { mergeable: null } };
+      const { emitted, poll } = started(routes);
+      await poll();
+      routes[detailUrl] = { body: { mergeable: false } };
+      await poll();
+      await poll();
+      routes[detailUrl] = { body: { mergeable: true } };
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, (e.data as { from: unknown }).from, (e.data as { to: unknown }).to])).toEqual([
+        [PR_MERGEABILITY_CHANGED, null, 'conflicting'],
+        [PR_MERGEABILITY_CHANGED, 'conflicting', 'mergeable'],
+      ]);
+    });
   });
 
   it('refuses an empty token and names that are not owner/repo', () => {

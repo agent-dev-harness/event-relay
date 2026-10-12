@@ -31,7 +31,7 @@ Source → emit → dedupe → match subscriptions → per-subscriber queue (coa
 |---|---|
 | **Contract** (`src/contract.ts`) | `RelayEvent`, `KindSpec`, `Source`, `Sink`. It imports nothing, so consumers can use it without loading the relay. |
 | **Sources** (`src/sources/<name>/`) | Each source owns how its events arrive (webhook, polling, …) and turns them into changes of the kinds it declares: a redelivered payload or a repeat of the current state produces no event. Text written by third parties goes in `untrusted`, never in `data`. |
-| **Code host providers** | `ScmSource` (`src/sources/scm/`) is the source for code hosts: it emits `ci.status_changed`, `pr.head_changed` and `pr.closed`, tracks each check's state and drops repeats and out-of-order updates. It gets provider-neutral observations from an `ScmProvider`, which is the only part that knows a host's payloads. `GitHubPoller` (`src/sources/github/`) and `AzureDevOpsPoller` (`src/sources/azure-devops/`) poll open pull requests and the CI on their heads, so nothing is lost while the relay is down; `GitHubProvider` instead takes GitHub webhooks. A provider must not import the core or another provider, and `ScmSource` must not import a provider. |
+| **Code host providers** | `ScmSource` (`src/sources/scm/`) is the source for code hosts: it emits `ci.status_changed`, `pr.head_changed`, `pr.closed`, `pr.review_submitted`, `pr.comment_added` and `pr.mergeability_changed`, tracks each check's state and drops repeats and out-of-order updates. It gets provider-neutral observations from an `ScmProvider`, which is the only part that knows a host's payloads. `GitHubPoller` (`src/sources/github/`) and `AzureDevOpsPoller` (`src/sources/azure-devops/`) poll open pull requests, the CI on their heads, and their reviews, comments and mergeability, so nothing is lost while the relay is down; `GitHubProvider` instead takes GitHub webhooks. A provider must not import the core or another provider, and `ScmSource` must not import a provider. |
 | **Kinds** (`src/kinds/`) | Each kind's data shape, subject and `KindSpec`, defined once in provider-neutral terms, so consumers don't depend on a source and several sources can emit one kind. A `KindSpec` says whether events coalesce (a subscriber only gets the latest per key), which event goes when a queue is full, and how long an event may wait. Kinds import only the contract. |
 | **Server** (`src/server/`) | `event-relay-server`: runs the relay and its pollers as a local HTTP server and streams each subscription as Server-Sent Events. Its endpoints are specified in [`docs/server.md`](docs/server.md). Nothing else may import it. |
 | **Core** (`src/core/`) | Subscriptions, delivery and resource limits. It must not import a kind or a source; `scripts/check-boundary.ts` enforces that, so provider details stay out of the core and a source can move to its own package without changing it. |
@@ -45,7 +45,7 @@ apart, and the next one waits until the previous one has settled or run past `de
 which counts as a failed delivery. The relay refuses limits it can't enforce, such as `NaN`,
 `Infinity` or a cap of 0. Sources cap their own ingestion: `GitHubProvider` refuses bodies over
 `maxPayloadBytes` before parsing them, and `ScmSource` remembers at most `maxTrackedChecks` check
-states. The pollers remember the open pull requests of the repositories they're configured with,
+states and `maxTrackedPullRequestItems` mergeability states and reported reviews and comments. The pollers remember the open pull requests of the repositories they're configured with,
 and `GitHubPoller` caches only the responses its last poll asked for.
 
 Nothing is dropped silently. When the relay drops an event (queue full, too large, expired, or
@@ -64,8 +64,8 @@ command: before acting on one, check the current state at its source.
 |---|---|
 | `@agent-dev-harness/event-relay` | `Relay`, `RelayLimits`, `DEFAULT_LIMITS`, and everything in `./contract` |
 | `@agent-dev-harness/event-relay/contract` | `RelayEvent`, `Subject`, `KindSpec`, `Source`, `SourceContext`, `Sink`, `SubscriptionFilter`, `SubscriptionOptions`, `GapEvent`, `GapData`, `GapReason`, `GAP_KIND`, `ALL_SUBJECTS` |
-| `@agent-dev-harness/event-relay/kinds` | `CI_STATUS_CHANGED`, `CiStatusChanged`, `CiState`, `commitSubject`, `ciStatusChangedSpec`, `PR_HEAD_CHANGED`, `PrHeadChanged`, `pullRequestSubject`, `prHeadChangedSpec`, `PR_CLOSED`, `PrClosed`, `prClosedSpec` |
-| `@agent-dev-harness/event-relay/scm` | `ScmSource`, `ScmSourceOptions`, and the provider interface: `ScmProvider`, `ScmObserver`, `CiObservation`, `PrHeadObservation`, `PrClosedObservation`, `ObservationOutcome` |
+| `@agent-dev-harness/event-relay/kinds` | `CI_STATUS_CHANGED`, `CiStatusChanged`, `CiState`, `commitSubject`, `ciStatusChangedSpec`, `PR_HEAD_CHANGED`, `PrHeadChanged`, `pullRequestSubject`, `prHeadChangedSpec`, `PR_CLOSED`, `PrClosed`, `prClosedSpec`, `PR_REVIEW_SUBMITTED`, `PrReviewSubmitted`, `ReviewState`, `prReviewSubmittedSpec`, `PR_COMMENT_ADDED`, `PrCommentAdded`, `prCommentAddedSpec`, `PR_MERGEABILITY_CHANGED`, `PrMergeabilityChanged`, `Mergeability`, `prMergeabilityChangedSpec` |
+| `@agent-dev-harness/event-relay/scm` | `ScmSource`, `ScmSourceOptions`, and the provider interface: `ScmProvider`, `ScmObserver`, `CiObservation`, `PrHeadObservation`, `PrClosedObservation`, `ReviewObservation`, `CommentObservation`, `MergeabilityObservation`, `ObservationOutcome` |
 | `@agent-dev-harness/event-relay/github` | `GitHubPoller`, `GitHubPollerOptions`, `GitHubProvider`, `GitHubProviderOptions`, `WebhookDelivery`, `WebhookResponse` |
 | `@agent-dev-harness/event-relay/azure-devops` | `AzureDevOpsPoller`, `AzureDevOpsPollerOptions` |
 | `@agent-dev-harness/event-relay/server` | `RelayServer`, `RelayServerOptions`, `DEFAULT_ALLOWED_HOSTS` |
@@ -109,7 +109,8 @@ Calling `subscribe` again with the same id changes that subscription; `cancel(id
 
 ### Event kinds
 
-`ci.status_changed`, `pr.head_changed`, `pr.closed` and `relay.gap`. Their fields, subjects and
+`ci.status_changed`, `pr.head_changed`, `pr.closed`, `pr.review_submitted`, `pr.comment_added`,
+`pr.mergeability_changed` and `relay.gap`. Their fields, subjects and
 guarantees are in [`docs/contract.md`](docs/contract.md); add a section there for every new kind.
 
 ## Development

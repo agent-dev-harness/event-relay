@@ -47,3 +47,77 @@ export const prClosedSpec: KindSpec = {
   coalesceKey: (event) => event.subject.key,
   overflow: 'drop-oldest',
 };
+
+export const PR_REVIEW_SUBMITTED = 'pr.review_submitted';
+
+export type ReviewState = 'approved' | 'changes_requested' | 'commented';
+
+/**
+ * `data` of a `pr.review_submitted` event: someone reviewed a pull request.
+ * Its subject is `pullRequestSubject(repository, number)`. It says that a review
+ * arrived, not what it says: fetch the review from `url`. `untrusted.author` is
+ * the reviewer.
+ */
+export interface PrReviewSubmitted {
+  /** `<host>/<path>`, e.g. "github.com/owner/repo". */
+  repository: string;
+  number: number;
+  /** Identifies the review within the pull request. */
+  reviewId: string;
+  state: ReviewState;
+  url: string | null;
+}
+
+export const prReviewSubmittedSpec: KindSpec = {
+  kind: PR_REVIEW_SUBMITTED,
+  // A subscriber woken by a review fetches the PR's reviews, so only the latest needs to wait in a queue.
+  coalesceKey: (event) => event.subject.key,
+  overflow: 'drop-oldest',
+};
+
+export const PR_COMMENT_ADDED = 'pr.comment_added';
+
+/**
+ * `data` of a `pr.comment_added` event: someone commented on a pull request,
+ * in its conversation or on its code. Its subject is
+ * `pullRequestSubject(repository, number)`. Fetch the comment from `url`;
+ * `untrusted.author` is who wrote it.
+ */
+export interface PrCommentAdded {
+  /** `<host>/<path>`, e.g. "github.com/owner/repo". */
+  repository: string;
+  number: number;
+  /** Identifies the comment within the pull request. */
+  commentId: string;
+  url: string | null;
+}
+
+export const prCommentAddedSpec: KindSpec = {
+  kind: PR_COMMENT_ADDED,
+  coalesceKey: (event) => event.subject.key,
+  overflow: 'drop-oldest',
+};
+
+export const PR_MERGEABILITY_CHANGED = 'pr.mergeability_changed';
+
+export type Mergeability = 'mergeable' | 'conflicting';
+
+/**
+ * `data` of a `pr.mergeability_changed` event: a pull request started or stopped
+ * conflicting with its base. Its subject is `pullRequestSubject(repository, number)`.
+ */
+export interface PrMergeabilityChanged {
+  /** `<host>/<path>`, e.g. "github.com/owner/repo". */
+  repository: string;
+  number: number;
+  /** null when the source hasn't seen this PR's mergeability before, or has forgotten it. */
+  from: Mergeability | null;
+  to: Mergeability;
+  url: string | null;
+}
+
+export const prMergeabilityChangedSpec: KindSpec = {
+  kind: PR_MERGEABILITY_CHANGED,
+  coalesceKey: (event) => event.subject.key,
+  overflow: 'drop-oldest',
+};
