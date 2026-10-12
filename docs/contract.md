@@ -70,7 +70,8 @@ state the source doesn't recognize.
 
 An event is sent only when the `CiState` changes, and an update older than the last one reported
 for that check is dropped, so a late `running` never follows its `success`. A re-run of a check
-is reported as a change back to `pending` or `running`.
+is reported as a change back to `pending` or `running` when the source sees it running (see
+[Delivery](#delivery)); one that ends in the state it started from may send nothing.
 
 Queued events coalesce per commit and check: a subscriber that falls behind gets each check's
 latest state.
@@ -100,7 +101,9 @@ A pull request was merged, or closed without merging. Subject: `pull_request`.
 | `head` | The head commit when it closed. |
 | `url` | A link to the pull request, or `null`. |
 
-A PR reopened later sends `pr.head_changed` with `from: null`. Queued events coalesce per PR.
+A PR reopened later sends `pr.head_changed` with `from: null`, unless it was closed and reopened
+on the same head between two looks of the source (see [Delivery](#delivery)). Queued events
+coalesce per PR.
 
 ### `pr.review_submitted`
 
@@ -115,7 +118,8 @@ not what it says: fetch the review from `url`.
 | `url` | A link to the review or the pull request, or `null`. |
 
 `untrusted.author` is the reviewer. A review is reported once, if it was submitted after the
-source started watching the repository (give or take a minute, for clock differences). Queued events coalesce per PR.
+source started watching the repository (give or take a minute, for clock differences). Queued
+events coalesce per PR.
 
 ### `pr.comment_added`
 
@@ -130,8 +134,7 @@ Someone commented on a pull request, in its conversation or on its code. Subject
 
 `untrusted.author` is who wrote it. A comment is reported once, if it was written after the
 source started watching the repository (give or take a minute); edits and deletions are not
-reported. Queued events
-coalesce per PR.
+reported. Queued events coalesce per PR.
 
 ### `pr.mergeability_changed`
 
@@ -174,6 +177,12 @@ the code host instead of waiting for events.
   after that window can arrive twice, so handle each id idempotently.
 - **Losses.** Every event the relay drops is reported as a `relay.gap`. A sink that rejects, or
   doesn't settle in time, loses that batch, which is reported as a gap in the next one.
+- **Polling.** A source may look at its host every so often (the code host sources do) instead of
+  being told of each change. A change that starts and ends between two looks can then be missed,
+  and several changes in between arrive as one: a head pushed twice is reported as one move.
+- **A source that can't see its host stops**, rather than going quiet: `event-relay-server`
+  exits, closing every stream. So no events means nothing changed, as far as the host says.
+  Embedding the relay, a poller that stops calls its `onFatal`, or throws if there is none.
 - **Not covered.** Events queued when the relay process stops are lost without a gap; a subscriber
   learns of it only by subscribing again (see [Subscribing](#subscribing)). Persistence is not part
   of the relay; the server's access control is in [`server.md`](server.md).
