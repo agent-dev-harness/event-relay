@@ -162,6 +162,13 @@ describe('GitHubProvider', () => {
       expect((emitted[2]!.data as PrHeadChanged).to).toBe(OLD);
     });
 
+    it('ignores a push without the previous head, since a null from means opened or reopened', () => {
+      const { emitted, deliver } = started();
+
+      expect(deliver('pull_request', pullRequestPayload('synchronize', NEW)).message).toBe('ignored');
+      expect(emitted).toEqual([]);
+    });
+
     it('reports a closed PR as pr.closed, with whether it merged', () => {
       const { emitted, deliver } = started();
       const payload = pullRequestPayload('closed', OLD);

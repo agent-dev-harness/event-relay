@@ -102,11 +102,13 @@ export function readPrHeadObservation(eventName: string, payload: unknown): PrHe
   const repository = repositoryId(payload.repository);
   const number = num(pr, 'number');
   const sha = isObject(pr.head) ? str(pr.head, 'sha') : null;
+  const before = action === 'synchronize' ? str(payload, 'before') : null;
   if (repository === null || number === null || sha === null) return null;
+  if (action === 'synchronize' && before === null) return null;
   return {
     repository,
     number,
-    before: action === 'synchronize' ? str(payload, 'before') : null,
+    before,
     sha,
     occurredAt: str(pr, 'updated_at'),
     url: str(pr, 'html_url'),
