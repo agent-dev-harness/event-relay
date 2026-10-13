@@ -293,6 +293,49 @@ describe('AzureDevOpsPoller', () => {
     });
   });
 
+  describe('with a supplied Authorization header', () => {
+    const json = (status: number) => new Response(JSON.stringify({ value: [] }), { status, headers: { 'content-type': 'application/json' } });
+
+    it('asks for the header before every request and sends it as given', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [] } } };
+      let n = 0;
+      const authorization = vi.fn(() => `Bearer t${++n}`);
+      const { requests, poll } = started(routes, { token: undefined, authorization });
+
+      await poll();
+      await poll();
+
+      expect(requests.map((r) => r.headers.authorization)).toEqual(['Bearer t1', 'Bearer t2']);
+    });
+
+    it('asks once more after a rejection, and stops if that header is rejected too', async () => {
+      let answers = [401, 200];
+      const fetch = vi.fn(async () => json(answers.shift() ?? 401));
+      const authorization = vi.fn(async () => 'Bearer fresh');
+      const { fatal, poll } = started({}, { token: undefined, authorization, fetch: fetch as unknown as typeof globalThis.fetch });
+
+      await poll();
+      expect(fatal).toEqual([]);
+      expect(authorization).toHaveBeenCalledTimes(2);
+
+      answers = [401, 401];
+      await poll();
+      expect(String(fatal[0])).toContain('rejected the credential');
+    });
+
+    it('stops polling when the function throws or returns nothing', async () => {
+      for (const authorization of [() => { throw new Error('token file missing'); }, () => '']) {
+        const fetch = vi.fn(async () => json(200));
+        const { fatal, poll } = started({}, { token: undefined, authorization, fetch: fetch as unknown as typeof globalThis.fetch });
+
+        await poll();
+
+        expect(String(fatal[0])).toMatch(/authorization function/);
+        expect(fetch).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   describe('with the Azure CLI', () => {
     const azToken = (accessToken: string, expiresInS: number) =>
       JSON.stringify({ accessToken, expires_on: Math.floor(Date.now() / 1000) + expiresInS, tokenType: 'Bearer' });
@@ -364,6 +407,7 @@ describe('AzureDevOpsPoller', () => {
     expect(() => new AzureDevOpsPoller({ ...base, token: '' })).toThrow('token');
     expect(() => new AzureDevOpsPoller({ ...base, token: undefined })).toThrow('exactly one');
     expect(() => new AzureDevOpsPoller({ ...base, azureCli: true })).toThrow('exactly one');
+    expect(() => new AzureDevOpsPoller({ ...base, authorization: () => 'Bearer x' })).toThrow('exactly one');
     expect(() => new AzureDevOpsPoller({ ...base, organizationUrl: 'not a url' })).toThrow('URL');
     expect(() => new AzureDevOpsPoller({ ...base, repositories: ['repo'] })).toThrow('project/repository');
   });

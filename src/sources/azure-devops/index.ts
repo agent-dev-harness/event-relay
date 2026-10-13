@@ -2,7 +2,7 @@ import type { ScmObserver, ScmProvider } from '../scm/provider';
 import { isObject, num, str, type Json } from '../scm/json';
 import { ActivityWindow, HttpError, OpenPullRequests, pollEvery, RateLimited, retryAfterMs, runPolling, Unexpected } from '../scm/poll';
 import type { Mergeability, ReviewState } from '../../kinds';
-import { azureCli, personalAccessToken, type Credential, type RunAzureCli } from './auth';
+import { azureCli, personalAccessToken, suppliedAuthorization, type Credential, type RunAzureCli } from './auth';
 import { buildHeadSha, readBuildObservation, readStatusObservation, sourceHeadSha } from './normalize';
 
 export interface AzureDevOpsPollerOptions {
@@ -10,10 +10,15 @@ export interface AzureDevOpsPollerOptions {
   organizationUrl: string;
   /** `project/repository` names. */
   repositories: readonly string[];
-  /** A personal access token with Code (read) and Build (read). Give this or `azureCli`. */
+  /** A personal access token with Code (read) and Build (read). Give exactly one of this, `azureCli` and `authorization`. */
   token?: string;
   /** Use the Azure CLI's signed-in account (`az login`) instead of a token. */
   azureCli?: boolean;
+  /**
+   * Returns the whole `Authorization` header value, e.g. "Bearer …", for a caller
+   * that keeps its own credential fresh. Called before every request.
+   */
+  authorization?: () => string | Promise<string>;
   /** How to run `az`; defaults to the `az` on PATH. */
   runAzureCli?: RunAzureCli;
   intervalMs?: number;
@@ -68,7 +73,9 @@ export class AzureDevOpsPoller implements ScmProvider {
   private observer: ScmObserver | undefined;
 
   constructor(private readonly options: AzureDevOpsPollerOptions) {
-    if ((options.token === undefined) === !options.azureCli) throw new Error('give exactly one of token and azureCli');
+    if ([options.token !== undefined, options.azureCli === true, options.authorization !== undefined].filter(Boolean).length !== 1) {
+      throw new Error('give exactly one of token, azureCli and authorization');
+    }
     if (options.token === '') throw new Error('token must not be empty');
     if (!URL.canParse(options.organizationUrl)) throw new Error(`organizationUrl "${options.organizationUrl}" is not a URL`);
     this.organizationUrl = options.organizationUrl.replace(/\/+$/, '');
@@ -88,7 +95,11 @@ export class AzureDevOpsPoller implements ScmProvider {
     });
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.fetch = options.fetch ?? globalThis.fetch;
-    this.credential = options.token !== undefined ? personalAccessToken(options.token) : azureCli(options.runAzureCli);
+    this.credential = options.token !== undefined
+      ? personalAccessToken(options.token)
+      : options.authorization !== undefined
+        ? suppliedAuthorization(options.authorization)
+        : azureCli(options.runAzureCli);
   }
 
   start(observer: ScmObserver, signal: AbortSignal): void {
