@@ -22,6 +22,27 @@ export function personalAccessToken(token: string): Credential {
 }
 
 /**
+ * Whatever header the caller supplies, asked for on every request so a token
+ * the caller refreshes is picked up at once. After a rejection it is asked once
+ * more, in case the caller had just replaced it.
+ */
+export function suppliedAuthorization(supply: () => string | Promise<string>): Credential {
+  return {
+    async header() {
+      let header: string;
+      try {
+        header = await supply();
+      } catch (error) {
+        throw new Unexpected(`the authorization function failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
+      if (typeof header !== 'string' || header === '') throw new Unexpected('the authorization function returned no header');
+      return header;
+    },
+    rejected: () => true,
+  };
+}
+
+/**
  * Tokens from the Azure CLI's signed-in account (`az login`). `az` refreshes
  * them with its own refresh token; this asks for a new one shortly before the
  * current one expires, or after the host rejected it.
