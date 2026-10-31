@@ -39,8 +39,9 @@ interface Cached {
 /**
  * Polls each repository's open pull requests: the check runs and commit
  * statuses on their heads, their reviews, comments and mergeability. It turns
- * what changed into observations for an ScmSource. Polling instead of webhooks means nothing is lost while the relay
- * is down: the next poll sees the current state.
+ * what changed into observations for an ScmSource. The first poll only records
+ * what is there: changes made while the relay was down are not reported, so a
+ * subscriber reads the current state when it connects.
  *
  * Requests are conditional (ETag), and GitHub doesn't count a 304 against the
  * rate limit, so polling things that haven't changed is nearly free.
@@ -119,9 +120,9 @@ export class GitHubPoller implements ScmProvider {
     }
 
     for (const pr of open.values()) {
-      await this.pollChecks(observer, name, pr);
+      await this.pollChecks(observer, name, pr, window.baseline);
       await this.pollReviews(observer, name, pr, since);
-      await this.pollMergeability(observer, name, pr);
+      await this.pollMergeability(observer, name, pr, window.baseline);
     }
     await this.pollComments(observer, name, open, since);
 
@@ -152,13 +153,13 @@ export class GitHubPoller implements ScmProvider {
     }
   }
 
-  private async pollMergeability(observer: ScmObserver, name: string, pr: Json): Promise<void> {
+  private async pollMergeability(observer: ScmObserver, name: string, pr: Json, baseline: boolean): Promise<void> {
     const number = num(pr, 'number')!;
     const repository = baseRepositoryId(pr);
     // The PR list leaves `mergeable` out, and GitHub works it out lazily: null means not known yet.
     const detail = await this.getJson(`${this.apiUrl}/repos/${name}/pulls/${number}`);
     if (repository === null || !isObject(detail) || typeof detail.mergeable !== 'boolean') return;
-    observer.mergeability({ repository, number, state: detail.mergeable ? 'mergeable' : 'conflicting', url: str(pr, 'html_url') });
+    observer.mergeability({ repository, number, state: detail.mergeable ? 'mergeable' : 'conflicting', url: str(pr, 'html_url'), baseline });
   }
 
   /** Conversation and code comments of the whole repository, made since `since`, on PRs that are open. */
@@ -183,7 +184,7 @@ export class GitHubPoller implements ScmProvider {
     }
   }
 
-  private async pollChecks(observer: ScmObserver, name: string, pr: Json): Promise<void> {
+  private async pollChecks(observer: ScmObserver, name: string, pr: Json, baseline: boolean): Promise<void> {
     const sha = headSha(pr)!;
     const repository = isObject(pr.base) && isObject(pr.base.repo) ? pr.base.repo : null;
     if (repository === null) return;
@@ -196,14 +197,14 @@ export class GitHubPoller implements ScmProvider {
     runs.sort((a, b) => (num(a, 'id') ?? 0) - (num(b, 'id') ?? 0));
     for (const run of runs) {
       const observation = readCiObservation('check_run', { check_run: run, repository });
-      if (observation) observer.ci(observation);
+      if (observation) observer.ci({ ...observation, baseline });
     }
 
     const combined = await this.getJson(`${this.apiUrl}/repos/${name}/commits/${sha}/status?per_page=100`);
     const statuses = isObject(combined) && Array.isArray(combined.statuses) ? combined.statuses.filter(isObject) : [];
     for (const status of statuses) {
       const observation = readCiObservation('status', { ...status, sha, repository });
-      if (observation) observer.ci(observation);
+      if (observation) observer.ci({ ...observation, baseline });
     }
   }
 

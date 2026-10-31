@@ -66,7 +66,8 @@ const isBefore = (a: CiObservation['order'], b: CiObservation['order']): boolean
  *
  * A check is reported only when its CiState changes, and an update older than
  * the last one reported for that check is dropped, so a late `in_progress`
- * never follows its `completed`.
+ * never follows its `completed`. A baseline observation of a check or of
+ * mergeability is only recorded: what was there when polling began is not a change.
  */
 export class ScmSource implements Source {
   readonly id: string;
@@ -104,7 +105,7 @@ export class ScmSource implements Source {
     const last = this.lastStates.get(trackingKey);
     if (last && isBefore(observation.order, last.order)) return 'stale';
     const from = last?.state ?? null;
-    if (from === observation.state) {
+    if (observation.baseline || from === observation.state) {
       this.lastStates.set(trackingKey, { state: observation.state, order: observation.order });
       return 'no change';
     }
@@ -216,7 +217,10 @@ export class ScmSource implements Source {
   private onMergeability(context: SourceContext, observation: MergeabilityObservation): ObservationOutcome {
     const subject = pullRequestSubject(observation.repository, observation.number);
     const from = this.lastMergeability.get(subject.key) ?? null;
-    if (from === observation.state) return 'no change';
+    if (observation.baseline || from === observation.state) {
+      this.lastMergeability.set(subject.key, observation.state);
+      return 'no change';
+    }
     const observedAt = new Date().toISOString();
     const event: RelayEvent<PrMergeabilityChanged> = {
       id: `${this.id}:mergeability:${subject.key}:${from ?? 'none'}..${observation.state}@${observedAt}`,

@@ -30,8 +30,9 @@ GITHUB_TOKEN=… AZURE_DEVOPS_TOKEN=… event-relay-server relay.config.json
 
 Configure at least one of `github` and `azureDevOps`. Tokens come only from the environment, so the
 file can be committed. Each source polls every `intervalMs` (default 30 s): events arrive up to one
-interval after the change, and nothing is lost while the server is down, because the next poll
-sees the current state.
+interval after the change. The first poll after the server starts only records the current
+state, so a restart doesn't replay it as changes; what changed while the server was down is not
+sent either, which is why subscribers fetch the current state when they connect (below).
 
 **The server exits (status 1) when a source can't poll**, so it never looks like a host where
 nothing happens. That is: a rejected token, a repository that isn't found, `az` failing to give a

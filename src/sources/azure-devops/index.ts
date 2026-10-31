@@ -154,11 +154,11 @@ export class AzureDevOpsPoller implements ScmProvider {
 
     const opened = new Set(changed.filter((change) => change.before === null).map((change) => change.number));
     for (const [number, pr] of open) {
-      await this.pollChecks(observer, repository, number, pr);
+      await this.pollChecks(observer, repository, number, pr, window.baseline);
       this.reportVotes(observer, repository, number, pr, opened.has(number), pollStart);
       await this.pollThreads(observer, repository, number, since);
       const state = MERGE_STATES[str(pr, 'mergeStatus') ?? ''];
-      if (state) observer.mergeability({ repository: repository.id, number, state, url: `${repository.web}/pullrequest/${number}` });
+      if (state) observer.mergeability({ repository: repository.id, number, state, url: `${repository.web}/pullrequest/${number}`, baseline: window.baseline });
     }
 
     for (const number of gone) {
@@ -237,7 +237,7 @@ export class AzureDevOpsPoller implements ScmProvider {
     }
   }
 
-  private async pollChecks(observer: ScmObserver, repository: Repository, number: number, pr: Json): Promise<void> {
+  private async pollChecks(observer: ScmObserver, repository: Repository, number: number, pr: Json, baseline: boolean): Promise<void> {
     const head = sourceHeadSha(pr)!;
     const builds = await this.getList(
       `${this.organizationUrl}/${encodeURIComponent(repository.project)}/_apis/build/builds`
@@ -248,13 +248,13 @@ export class AzureDevOpsPoller implements ScmProvider {
     for (const build of builds) {
       const sha = buildHeadSha(build, pr);
       const observation = sha === null ? null : readBuildObservation(repository.id, sha, build);
-      if (observation) observer.ci(observation);
+      if (observation) observer.ci({ ...observation, baseline });
     }
 
     const statuses = await this.getList(`${repository.api}/commits/${head}/statuses?latestOnly=true`);
     for (const status of statuses) {
       const observation = readStatusObservation(repository.id, head, status);
-      if (observation) observer.ci(observation);
+      if (observation) observer.ci({ ...observation, baseline });
     }
   }
 

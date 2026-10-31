@@ -101,17 +101,40 @@ beforeEach(() => vi.useFakeTimers({ now: 0 }));
 afterEach(() => vi.useRealTimers());
 
 describe('GitHubPoller', () => {
-  it('does not report PRs already open when polling starts, but reports their CI', async () => {
+  it('does not report PRs already open when polling starts, nor their CI or mergeability, but reports changes from there', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
     noChecks(routes, OLD);
-    routes[`${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`] = { body: { check_runs: [checkRun(1, OLD, 'in_progress')] } };
+    const checkRunsUrl = `${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`;
+    routes[checkRunsUrl] = { body: { check_runs: [checkRun(1, OLD, 'in_progress')] } };
+    routes[`${API}/repos/o/r/pulls/7`] = { body: { mergeable: true } };
     const { poll, emitted } = started(routes);
 
     await poll();
+    expect(emitted).toEqual([]);
 
-    expect(emitted.map((e) => [e.kind, e.subject.key, (e.data as { to: unknown }).to])).toEqual([
-      [CI_STATUS_CHANGED, `github.com/o/r@${OLD}`, 'running'],
+    routes[checkRunsUrl] = { body: { check_runs: [checkRun(1, OLD, 'completed', 'success')] } };
+    routes[`${API}/repos/o/r/pulls/7`] = { body: { mergeable: false } };
+    await poll();
+
+    expect(emitted.map((e) => [e.kind, e.subject.key, (e.data as { from: unknown }).from, (e.data as { to: unknown }).to])).toEqual([
+      [CI_STATUS_CHANGED, `github.com/o/r@${OLD}`, 'running', 'success'],
+      [PR_MERGEABILITY_CHANGED, 'github.com/o/r#7', 'mergeable', 'conflicting'],
     ]);
+  });
+
+  it('records CI as a baseline until a poll succeeds', async () => {
+    const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
+    noChecks(routes, OLD);
+    routes[`${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`] = { status: 502 };
+    const { poll, emitted, errors } = started(routes);
+    await poll();
+    routes[`${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`] = { body: { check_runs: [checkRun(1, OLD, 'in_progress')] } };
+    await poll();
+    routes[`${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`] = { body: { check_runs: [checkRun(1, OLD, 'completed', 'failure')] } };
+    await poll();
+
+    expect(errors).toHaveLength(1);
+    expect(emitted.map((e) => [(e.data as { from: unknown }).from, (e.data as { to: unknown }).to])).toEqual([['running', 'failure']]);
   });
 
   it('reports a moved head with the previous head, and a new PR as opened', async () => {
@@ -164,11 +187,12 @@ describe('GitHubPoller', () => {
   it('reports a re-run of a check after the run it replaced', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
     noChecks(routes, OLD);
+    const { poll, emitted } = started(routes);
+    await poll();
+
     routes[`${API}/repos/o/r/commits/${OLD}/check-runs?per_page=100`] = {
       body: { check_runs: [checkRun(2, OLD, 'in_progress'), checkRun(1, OLD, 'completed', 'failure')] },
     };
-    const { poll, emitted } = started(routes);
-
     await poll();
 
     expect(emitted.map((e) => (e.data as { to: unknown }).to)).toEqual(['failure', 'running']);
@@ -177,11 +201,12 @@ describe('GitHubPoller', () => {
   it('reports commit statuses on the head', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: [pull(7, OLD)] } };
     noChecks(routes, OLD);
+    const { poll, emitted } = started(routes);
+    await poll();
+
     routes[`${API}/repos/o/r/commits/${OLD}/status?per_page=100`] = {
       body: { statuses: [{ id: 5, state: 'success', context: 'ci/legacy', target_url: null, updated_at: '2026-01-01T00:00:00Z' }] },
     };
-    const { poll, emitted } = started(routes);
-
     await poll();
 
     expect(emitted.map((e) => [e.subject.key, (e.data as { check: string }).check, e.untrusted.name, (e.data as { to: unknown }).to])).toEqual([
@@ -202,7 +227,7 @@ describe('GitHubPoller', () => {
     const second = github.requests.slice(firstPollRequests);
     expect(second.length).toBe(firstPollRequests);
     expect(second.every((r) => r.headers['if-none-match'] !== undefined)).toBe(true);
-    expect(emitted).toHaveLength(1);
+    expect(emitted).toEqual([]);
   });
 
   it('follows Link pagination', async () => {

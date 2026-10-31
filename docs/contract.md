@@ -180,6 +180,9 @@ the code host instead of waiting for events.
 - **Polling.** A source may look at its host every so often (the code host sources do) instead of
   being told of each change. A change that starts and ends between two looks can then be missed,
   and several changes in between arrive as one: a head pushed twice is reported as one move.
+  A poller's first look only records what is there, so starting or restarting the relay sends
+  nothing for PRs, checks, mergeability, reviews and comments that already exist, and nothing
+  for what changed while it was down.
 - **A source that can't see its host stops**, rather than going quiet: `event-relay-server`
   exits, closing every stream. So no events means nothing changed, as far as the host says.
   Embedding the relay, a poller that stops calls its `onFatal`, or throws if there is none.
