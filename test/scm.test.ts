@@ -86,6 +86,15 @@ describe('ScmSource', () => {
       });
     });
 
+    it('records a baseline without reporting it, and reports later changes from it', () => {
+      const { observer, emitted } = started();
+      expect(observer.ci(ci({ state: 'running', detail: 'in_progress', deliveryKey: 'job:1:in_progress', order: [1, 1], baseline: true }))).toBe('no change');
+      expect(observer.ci(ci({ state: 'running', detail: 'in_progress', deliveryKey: 'job:1:in_progress', order: [1, 1] }))).toBe('no change');
+      observer.ci(ci({ state: 'success', detail: 'success', deliveryKey: 'job:1:success', order: [1, 2] }));
+
+      expect(transitions(emitted)).toEqual([['running', 'success']]);
+    });
+
     it('reports nothing when the state has not changed', () => {
       const { observer, emitted } = started();
 

@@ -81,6 +81,14 @@ export class ActivityWindow {
     return (this.lastSuccess ?? now) - CLOCK_SKEW_MS;
   }
 
+  /**
+   * True until a poll has succeeded. What such a poll sees was there before
+   * polling began, so CI states and mergeability are reported as a baseline.
+   */
+  get baseline(): boolean {
+    return this.lastSuccess === null;
+  }
+
   /** Call when the poll begun last finished. */
   succeeded(): void {
     this.lastSuccess = this.current;

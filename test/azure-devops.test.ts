@@ -94,9 +94,10 @@ describe('AzureDevOpsPoller', () => {
   it('authenticates with the PAT and names repositories by host and path', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD)] } } };
     quiet(routes, [7, OLD]);
-    routes[statusesUrl(OLD)] = { body: { value: [{ id: 1, state: 'succeeded', context: { name: 'lint', genre: 'tools' }, targetUrl: null }] } };
     const { emitted, requests, poll } = started(routes);
+    await poll();
 
+    routes[statusesUrl(OLD)] = { body: { value: [{ id: 1, state: 'succeeded', context: { name: 'lint', genre: 'tools' }, targetUrl: null }] } };
     await poll();
 
     expect(requests[0]!.headers.authorization).toBe(`Basic ${Buffer.from(':pat').toString('base64')}`);
@@ -139,8 +140,10 @@ describe('AzureDevOpsPoller', () => {
   it('reports a PR build on the PR head, not the merge commit it built', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD)] } } };
     quiet(routes, [7, OLD]);
-    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null)] } };
     const { emitted, poll } = started(routes);
+    await poll();
+
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null)] } };
     await poll();
 
     routes[buildsUrl(7)] = { body: { value: [build(11, 'completed', 'partiallySucceeded')] } };
@@ -156,8 +159,9 @@ describe('AzureDevOpsPoller', () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD)] } } };
     quiet(routes, [7, OLD]);
     const at = (minute: number) => ({ lastChangedDate: `2026-01-01T00:0${minute}:00Z` });
-    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null, at(1))] } };
     const { emitted, poll } = started(routes);
+    await poll();
+    routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null, at(1))] } };
     await poll();
     routes[buildsUrl(7)] = { body: { value: [build(11, 'completed', 'failed', at(2))] } };
     await poll();
@@ -172,6 +176,9 @@ describe('AzureDevOpsPoller', () => {
   it('uses triggerInfo pr.sourceSha when the pipeline reports it, and skips a build it cannot place', async () => {
     const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, NEW)] } } };
     quiet(routes, [7, NEW]);
+    const { emitted, poll } = started(routes);
+    await poll();
+
     routes[buildsUrl(7)] = {
       body: {
         value: [
@@ -180,8 +187,6 @@ describe('AzureDevOpsPoller', () => {
         ],
       },
     };
-    const { emitted, poll } = started(routes);
-
     await poll();
 
     expect(ciData(emitted).map((d) => [d.sha, d.to])).toEqual([[OLD, 'failure']]);
@@ -273,6 +278,24 @@ describe('AzureDevOpsPoller', () => {
 
       expect(emitted.map((e) => [e.kind, (e.data as { commentId: string; url: string }).commentId, (e.data as { url: string }).url, e.untrusted.author])).toEqual([
         [PR_COMMENT_ADDED, '3:2', `${ORG}/proj/_git/repo/pullrequest/7?discussionId=3`, 'dev@example.com'],
+      ]);
+    });
+
+    it('records CI and mergeability already there when polling starts, and reports changes from there', async () => {
+      const routes: Record<string, Route> = { [pullsUrl]: { body: { value: [pr(7, OLD, { mergeStatus: 'succeeded' })] } } };
+      quiet(routes, [7, OLD]);
+      routes[buildsUrl(7)] = { body: { value: [build(11, 'inProgress', null)] } };
+      const { emitted, poll } = started(routes);
+      await poll();
+      expect(emitted).toEqual([]);
+
+      routes[pullsUrl] = { body: { value: [pr(7, OLD, { mergeStatus: 'conflicts' })] } };
+      routes[buildsUrl(7)] = { body: { value: [build(11, 'completed', 'succeeded')] } };
+      await poll();
+
+      expect(emitted.map((e) => [e.kind, (e.data as { from: string }).from, (e.data as { to: string }).to])).toEqual([
+        [CI_STATUS_CHANGED, 'running', 'success'],
+        [PR_MERGEABILITY_CHANGED, 'mergeable', 'conflicting'],
       ]);
     });
 
@@ -393,10 +416,12 @@ describe('AzureDevOpsPoller', () => {
     const routes: Record<string, Route> = {
       [`${legacyGit}/pullrequests?searchCriteria.status=active&$top=100&$skip=0&api-version=7.1`]: { body: { value: [pr(7, OLD)] } },
       [`https://org.visualstudio.com/proj/_apis/build/builds?branchName=${encodeURIComponent('refs/pull/7/merge')}&queryOrder=queueTimeDescending&$top=50&api-version=7.1`]: { body: { value: [] } },
-      [`${legacyGit}/commits/${OLD}/statuses?latestOnly=true&api-version=7.1`]: { body: { value: [{ id: 1, state: 'pending', context: { name: 'lint' } }] } },
+      [`${legacyGit}/commits/${OLD}/statuses?latestOnly=true&api-version=7.1`]: { body: { value: [] } },
     };
     const { emitted, poll } = started(routes, { organizationUrl: 'https://org.visualstudio.com/' });
+    await poll();
 
+    routes[`${legacyGit}/commits/${OLD}/statuses?latestOnly=true&api-version=7.1`] = { body: { value: [{ id: 1, state: 'pending', context: { name: 'lint' } }] } };
     await poll();
 
     expect(emitted.map((e) => e.subject.key)).toEqual([`${REPOSITORY}@${OLD}`]);

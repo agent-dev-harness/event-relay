@@ -25,6 +25,8 @@ export interface CiObservation {
   order: readonly [number, number];
   occurredAt: string | null;
   url: string | null;
+  /** Set when the provider first looks at the host: ScmSource records the state to compare later updates with, and reports nothing. */
+  baseline?: boolean;
 }
 
 /** A pull request's head commit, as a provider reports it when the head may have moved. */
@@ -89,6 +91,8 @@ export interface MergeabilityObservation {
   number: number;
   state: Mergeability;
   url: string | null;
+  /** As in CiObservation. */
+  baseline?: boolean;
 }
 
 /** What ScmSource did with an observation. */
